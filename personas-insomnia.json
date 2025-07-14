@@ -1,0 +1,200 @@
+{
+  "_type": "export",
+  "__export_format": 4,
+  "__export_date": "2024-07-07T00:00:00.000Z",
+  "__export_source": "insomnia.desktop.app:v2024.3.0",
+  "resources": [
+    {
+      "_id": "wrk_personas_api_001",
+      "name": "Personas API",
+      "_type": "workspace"
+    },
+    {
+      "_id": "env_personas_api_001",
+      "_type": "environment",
+      "parentId": "wrk_personas_api_001",
+      "name": "Base Environment",
+      "data": {
+        "base_url": "http://localhost:3333",
+        "jwt": ""
+      }
+    },
+    {
+      "_id": "fld_auth_001",
+      "_type": "request_group",
+      "parentId": "wrk_personas_api_001",
+      "name": "Auth"
+    },
+    {
+      "_id": "req_register_001",
+      "_type": "request",
+      "parentId": "fld_auth_001",
+      "name": "Register",
+      "method": "POST",
+      "url": "{{ base_url }}/register",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"name\": \"Juan Perez\",\n  \"email\": \"juan@example.com\",\n  \"password\": \"123456\"\n}"
+      }
+    },
+    {
+      "_id": "req_login_001",
+      "_type": "request",
+      "parentId": "fld_auth_001",
+      "name": "Login",
+      "method": "POST",
+      "url": "{{ base_url }}/login",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"email\": \"juan@example.com\",\n  \"password\": \"123456\"\n}"
+      }
+    },
+    {
+      "_id": "req_logout_001",
+      "_type": "request",
+      "parentId": "fld_auth_001",
+      "name": "Logout",
+      "method": "POST",
+      "url": "{{ base_url }}/logout",
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {{ jwt }}"
+        }
+      ]
+    },
+    {
+      "_id": "req_me_001",
+      "_type": "request",
+      "parentId": "fld_auth_001",
+      "name": "Me",
+      "method": "GET",
+      "url": "{{ base_url }}/me",
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {{ jwt }}"
+        }
+      ]
+    },
+
+    {
+      "_id": "fld_personas_001",
+      "_type": "request_group",
+      "parentId": "wrk_personas_api_001",
+      "name": "Personas"
+    },
+    {
+      "_id": "req_personas_index_001",
+      "_type": "request",
+      "parentId": "fld_personas_001",
+      "name": "Listar personas (paginado)",
+      "method": "GET",
+      "url": "{{ base_url }}/personas?page=1&limit=10",
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {{ jwt }}"
+        }
+      ]
+    },
+    {
+      "_id": "req_personas_stats_001",
+      "_type": "request",
+      "parentId": "fld_personas_001",
+      "name": "Stats gráficas",
+      "method": "GET",
+      "url": "{{ base_url }}/personas-stats",
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {{ jwt }}"
+        }
+      ]
+    },
+    {
+      "_id": "req_personas_show_001",
+      "_type": "request",
+      "parentId": "fld_personas_001",
+      "name": "Mostrar persona por ID",
+      "method": "GET",
+      "url": "{{ base_url }}/personas/{{ persona_id }}",
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {{ jwt }}"
+        }
+      ]
+    },
+    {
+      "_id": "req_personas_create_001",
+      "_type": "request",
+      "parentId": "fld_personas_001",
+      "name": "Crear persona",
+      "method": "POST",
+      "url": "{{ base_url }}/personas",
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {{ jwt }}"
+        },
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"nombre\": \"Andrea\",\n  \"apellido_paterno\": \"Gómez\",\n  \"apellido_materno\": \"Ramírez\",\n  \"edad\": 25,\n  \"genero\": \"femenino\"\n}"
+      }
+    },
+    {
+      "_id": "req_personas_update_001",
+      "_type": "request",
+      "parentId": "fld_personas_001",
+      "name": "Actualizar persona",
+      "method": "PUT",
+      "url": "{{ base_url }}/personas/{{ persona_id }}",
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {{ jwt }}"
+        },
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"nombre\": \"Andrea\",\n  \"apellido_paterno\": \"Gómez\",\n  \"apellido_materno\": \"López\",\n  \"edad\": 26,\n  \"genero\": \"femenino\"\n}"
+      }
+    },
+    {
+      "_id": "req_personas_delete_001",
+      "_type": "request",
+      "parentId": "fld_personas_001",
+      "name": "Eliminar persona (softdelete)",
+      "method": "DELETE",
+      "url": "{{ base_url }}/personas/{{ persona_id }}",
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {{ jwt }}"
+        }
+      ]
+    }
+  ]
+}
