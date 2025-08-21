@@ -154,10 +154,13 @@ export class PlotStream {
     return out
   }
 
-  /** Envía al/los webhooks de Discord */
+  /** Envía al/los webhooks de Discord con la regla:
+   * - Si hay ≥ 8M/s en la base -> SOLO webhook2 (VIP) y se mandan todos los hallazgos relevantes.
+   * - Si NO hay ≥ 8M/s -> SOLO webhook principal (normal).
+   */
   async emitToDiscord(jobId: string, plots: Plot[]) {
-    const hookMain = env.get('DISCORD_WEBHOOK') // normal (≥1M; secrets ≥200k)
-    const hookVip = env.get('DISCORD_WEBHOOK2') // VIP (≥8M)
+    const hookMain = env.get('DISCORD_WEBHOOK')   // normal (≥1M; secrets ≥200k)
+    const hookVip  = env.get('DISCORD_WEBHOOK2')  // VIP (trigger si hay ≥8M)
 
     // --- Construir lista base de animales con perSecond numérico ---
     const items: { name: string; p: number; plot: string }[] = []
@@ -176,87 +179,113 @@ export class PlotStream {
       }
     }
 
-    // --- Filtrado normal (mismo comportamiento que tenías) ---
-    const normalFiltered = items
+    // Si no hay nada con número, avisa al principal y sal
+    if (!items.length) {
+      if (hookMain) {
+        await this.safePost(hookMain, {
+          embeds: [
+            {
+              title: 'SauPetNotify',
+              description: `❌ No hay animales con perSecond numérico en la base`,
+              color: 0xff0000,
+              footer: { text: `SauPetNotify • ${new Date().toLocaleString()}` },
+            },
+          ],
+        })
+      }
+      return
+    }
+
+    // --- Regla normal (relevantes): ≥1M o Secret ≥200k
+    const relevant = items
       .filter((i) => {
         const isSecret = i.name.toLowerCase().includes('(secret')
         return isSecret ? i.p >= 200_000 : i.p >= 1_000_000
       })
       .sort((a, b) => b.p - a.p)
 
-    // --- Filtrado VIP (≥ 8M/s) ---
-    const vipFiltered = items.filter((i) => i.p >= 8_000_000).sort((a, b) => b.p - a.p)
-
+    const hasVip = items.some((i) => i.p >= 8_000_000)
     const footer = { text: `SauPetNotify • ${new Date().toLocaleString()}` }
 
-    // --- Envío al webhook principal (si está configurado) ---
+    // ======================
+    //  Modo VIP exclusivo
+    // ======================
+    if (hasVip && hookVip) {
+      // Mandamos "todo eso" (los relevantes) únicamente al VIP
+      const fieldsVip = (relevant.length ? relevant : items) // si por alguna razón no hay "relevantes", cae a todos los items
+        .slice(0, 10)
+        .map((i) => ({
+          name: i.name,
+          value: `💎 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
+          inline: false,
+        }))
+
+      await this.safePost(hookVip, {
+        embeds: [
+          {
+            title: 'SauPetNotify — VIP (≥8M/s detectado)',
+            color: 0xf1c40f, // dorado
+            fields: [
+              ...fieldsVip,
+              {
+                name: '🆔 Job ID',
+                value: `\`\`\`${jobId}\`\`\``,
+                inline: false,
+              },
+            ],
+            footer,
+          },
+        ],
+        components: [
+          {
+            type: 1,
+            components: [
+              {
+                type: 2,
+                style: 2,
+                label: '📋 Copiar JobId',
+                custom_id: `copy_${jobId}`,
+              },
+            ],
+          },
+        ],
+      })
+
+      // IMPORTANTE: no mandamos nada al hook principal cuando hay VIP
+      return
+    }
+
+    // ======================
+    //  Modo normal (no hay ≥8M/s)
+    // ======================
     if (hookMain) {
-      if (!normalFiltered.length) {
+      if (!relevant.length) {
         await this.safePost(hookMain, {
           embeds: [
             {
-              title: 'SauPetNotify',
+              title: 'PetNotify',
               description: `❌ No hay animales Secret ≥200k/s ni normales ≥1M/s`,
               color: 0xff0000,
               footer,
             },
           ],
         })
-      } else {
-        const fields = normalFiltered.slice(0, 10).map((i) => ({
-          name: i.name,
-          value: `💰 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
-          inline: false,
-        }))
-
-        await this.safePost(hookMain, {
-          embeds: [
-            {
-              title: 'SauPetNotify',
-              color: 0x2ecc71,
-              fields: [
-                ...fields,
-                {
-                  name: '🆔 Job ID',
-                  value: `\`\`\`${jobId}\`\`\``,
-                  inline: false,
-                },
-              ],
-              footer,
-            },
-          ],
-          components: [
-            {
-              type: 1,
-              components: [
-                {
-                  type: 2,
-                  style: 2,
-                  label: '📋 Copiar JobId',
-                  custom_id: `copy_${jobId}`,
-                },
-              ],
-            },
-          ],
-        })
+        return
       }
-    }
 
-    // --- Envío VIP al segundo webhook (si hay ≥8M y está configurado) ---
-    if (hookVip && vipFiltered.length) {
-      const fieldsVip = vipFiltered.slice(0, 10).map((i) => ({
+      const fields = relevant.slice(0, 10).map((i) => ({
         name: i.name,
-        value: `💎 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
+        value: `💰 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
         inline: false,
       }))
 
-      await this.safePost(hookVip, {
+      await this.safePost(hookMain, {
         embeds: [
           {
-            title: 'SauPetNotify — VIP (≥8M/s)',
-            color: 0xf1c40f, // dorado
+            title: 'PetNotify',
+            color: 0x2ecc71,
             fields: [
-              ...fieldsVip,
+              ...fields,
               {
                 name: '🆔 Job ID',
                 value: `\`\`\`${jobId}\`\`\``,
