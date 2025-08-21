@@ -61,11 +61,13 @@
     "@adonisjs/cors": "^2.2.1",
     "@adonisjs/lucid": "^21.6.1",
     "@vinejs/vine": "^3.0.1",
+    "axios": "^1.11.0",
     "jsonwebtoken": "^9.0.2",
     "luxon": "^3.6.1",
     "mongodb": "^6.17.0",
     "mysql2": "^3.14.1",
     "reflect-metadata": "^0.2.2",
+    "undici": "^7.14.0",
     "uuid": "^11.1.0"
   },
   "hotHook": {
