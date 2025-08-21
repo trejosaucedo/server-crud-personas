@@ -54,6 +54,7 @@ export default class PlotsController {
       for (let i = 0; i < pagesToFetch; i++) {
         if (cursor === null) break
 
+        // @ts-ignore
         const { data, status } = await axios.get(
           `https://games.roblox.com/v1/games/${placeId}/servers/Public`,
           {
