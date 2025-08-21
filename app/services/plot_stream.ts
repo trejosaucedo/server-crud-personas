@@ -164,11 +164,12 @@ export class PlotStream {
   /** Envía al/los webhooks de Discord con la regla:
    * - Si hay ≥ 8M/s en el lote -> SOLO webhook VIP (8m).
    * - Si NO hay ≥ 8M/s -> SOLO webhook principal (normal).
-   * Si no hay VIP configurado pero sí ≥ 8M/s, hace fallback al principal (con aviso).
+   * - Independiente de lo anterior -> webhook CARLOS recibe todo ≥1M/s.
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
     const hookMain = env.get('DISCORD_WEBHOOK') // normal
-    const hookVip  = env.get('DISCORD_WEBHOOK_8M') || env.get('DISCORD_WEBHOOK2') // VIP
+    const hookVip = env.get('DISCORD_WEBHOOK_8M') // VIP
+    const hookCarlos = env.get('DISCORD_WEBHOOK_CARLOS') // +1M
 
     // Construir items con perSecond numérico
     const items: { name: string; p: number; plot: string; rarity?: string }[] = []
@@ -184,23 +185,20 @@ export class PlotStream {
       }
     }
 
-    // Si no hay valores numéricos -> NO emitir nada
     if (!items.length) return
 
     const maxPS = items.reduce((m, it) => (it.p > m ? it.p : m), 0)
     const hasVip = maxPS >= PlotStream.VIP_THRESHOLD
     const footer = { text: `SauPetNotify • ${new Date().toLocaleString()}` }
 
-    // Relevantes para canal normal
-    const relevantNormal = items
-      .filter((i) =>
-        i.rarity === 'Secret' ? i.p >= PlotStream.SECRET_MIN : i.p >= PlotStream.NORMAL_MIN
-      )
-      .sort((a, b) => b.p - a.p)
-
-    // === VIP (≥8M/s) ===
+    // ===============================
+    // 1. VIP (≥8M/s)
+    // ===============================
     if (hasVip) {
-      const fieldsVip = (relevantNormal.length ? relevantNormal : items).slice(0, 10).map((i) => ({
+      const relevantVip = items
+        .filter((i) => i.p >= PlotStream.VIP_THRESHOLD)
+        .sort((a, b) => b.p - a.p)
+      const fieldsVip = relevantVip.slice(0, 10).map((i) => ({
         name: i.rarity ? `${i.name} (${i.rarity})` : i.name,
         value: `💎 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
         inline: false,
@@ -223,7 +221,9 @@ export class PlotStream {
           components: [
             {
               type: 1,
-              components: [{ type: 2, style: 2, label: '📋 Copiar JobId', custom_id: `copy_${jobId}` }],
+              components: [
+                { type: 2, style: 2, label: '📋 Copiar JobId', custom_id: `copy_${jobId}` },
+              ],
             },
           ],
         })
@@ -244,20 +244,24 @@ export class PlotStream {
           ],
         })
       }
-      return
+      // 👇 importante: NO return, para que Carlos también reciba
     }
 
-    // === Modo normal ===
-    // Si no hay nada ≥1M (normal) o ≥200k (Secret) -> NO emitir nada
-    if (!relevantNormal.length) return
+    // ===============================
+    // 2. Normal (≥1M o ≥200k Secret)
+    // ===============================
+    const relevantNormal = items
+      .filter((i) =>
+        i.rarity === 'Secret' ? i.p >= PlotStream.SECRET_MIN : i.p >= PlotStream.NORMAL_MIN
+      )
+      .sort((a, b) => b.p - a.p)
 
-    const fields = relevantNormal.slice(0, 10).map((i) => ({
-      name: i.rarity ? `${i.name} (${i.rarity})` : i.name,
-      value: `💰 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
-      inline: false,
-    }))
-
-    if (hookMain) {
+    if (relevantNormal.length && hookMain) {
+      const fields = relevantNormal.slice(0, 10).map((i) => ({
+        name: i.rarity ? `${i.name} (${i.rarity})` : i.name,
+        value: `💰 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
+        inline: false,
+      }))
       await this.safePost(hookMain, {
         embeds: [
           {
@@ -273,13 +277,43 @@ export class PlotStream {
         components: [
           {
             type: 1,
-            components: [{ type: 2, style: 2, label: '📋 Copiar JobId', custom_id: `copy_${jobId}` }],
+            components: [
+              { type: 2, style: 2, label: '📋 Copiar JobId', custom_id: `copy_${jobId}` },
+            ],
           },
         ],
       })
     }
-  }
 
+    // ===============================
+    // 3. Webhook CARLOS (≥1M siempre)
+    // ===============================
+    if (hookCarlos) {
+      const relevantCarlos = items
+        .filter((i) => i.p >= PlotStream.NORMAL_MIN)
+        .sort((a, b) => b.p - a.p)
+      if (relevantCarlos.length) {
+        const fieldsCarlos = relevantCarlos.slice(0, 10).map((i) => ({
+          name: i.rarity ? `${i.name} (${i.rarity})` : i.name,
+          value: `⚡ **${this.human(i.p)}/s**\n📍 ${i.plot}`,
+          inline: false,
+        }))
+        await this.safePost(hookCarlos, {
+          embeds: [
+            {
+              title: 'PetNotify — Carlos (≥1M/s)',
+              color: 0x3498db,
+              fields: [
+                ...fieldsCarlos,
+                { name: '🆔 Job ID', value: `\`\`\`${jobId}\`\`\``, inline: false },
+              ],
+              footer,
+            },
+          ],
+        })
+      }
+    }
+  }
 
   /** POST con try/catch para no romper el flujo si un webhook falla */
   private async safePost(url: string, payload: any) {

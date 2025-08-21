@@ -45,55 +45,33 @@ export default class PlotsController {
   public async servers({ response }: HttpContext) {
     try {
       const placeId = 109983668079237
-      const limit = 100
-      const pagesToFetch = 3
 
-      let cursor: string | null = ''
-      let allServers: any[] = []
+      // tus microservicios
+      const urls = [
+        'https://scrapper1-production.up.railway.app/servers',
+        'https://scrapper2-production.up.railway.app/servers',
+        'https://scrapper3-production.up.railway.app/servers',
+      ]
 
-      for (let i = 0; i < pagesToFetch; i++) {
-        if (cursor === null) break
-
-        // @ts-ignore
-        const { data, status } = await axios.get(
-          `https://games.roblox.com/v1/games/${placeId}/servers/Public`,
-          {
-            params: {
-              cursor,
-              sortOrder: 'Desc',
-              excludeFullGames: true,
-              limit,
-            },
-            headers: { Accept: 'application/json' },
-            validateStatus: () => true,
-          }
+      // Ejecutar todos en paralelo
+      const results = await Promise.all(
+        urls.map((url) =>
+          axios
+            .get(url, { headers: { Accept: 'application/json' }, validateStatus: () => true })
+            .then((r) => (r.status >= 200 && r.status < 300 ? r.data : { ok: false, servers: [] }))
+            .catch(() => ({ ok: false, servers: [] }))
         )
+      )
 
-        if (status < 200 || status >= 300) {
-          return response.status(status).json({
-            ok: false,
-            error: 'roblox_api_error',
-            page: i + 1,
-          })
-        }
-
-        const arr = Array.isArray(data?.data) ? data.data : []
-        allServers.push(...arr)
-
-        cursor = data?.nextPageCursor || null
-        if (!cursor) break
-      }
+      // Combinar resultados
+      const allServers = results.flatMap((r) => (Array.isArray(r.servers) ? r.servers : []))
+      const totalFetched = allServers.length
 
       return response.json({
         ok: true,
         placeId,
-        totalFetched: allServers.length,
-        servers: allServers.map((s) => ({
-          id: s.id,
-          playing: s.playing,
-          maxPlayers: s.maxPlayers,
-          ping: s.ping,
-        })),
+        totalFetched,
+        servers: allServers,
       })
     } catch (err) {
       return response.status(502).json({
