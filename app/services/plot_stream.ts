@@ -47,6 +47,11 @@ export class PlotStream {
   private buffer: { at: number; jobId: string; generatedAt: string; plots: Plot[] }[] = []
   private ttlMs = 60_000
 
+  // Umbrales
+  private static VIP_THRESHOLD = 8_000_000
+  private static NORMAL_MIN = 1_000_000
+  private static SECRET_MIN = 200_000
+
   static getInstance() {
     if (!this.instance) this.instance = new PlotStream()
     return this.instance
@@ -127,11 +132,13 @@ export class PlotStream {
     for (const chunk of this.buffer) {
       for (const plot of chunk.plots) {
         for (const a of plot.animalPodiums) {
-          if (a.empty) continue
-          if (q.mutation && a.mutation !== q.mutation) continue
-          if (q.rarity && a.rarity !== q.rarity) continue
+          if ((a as AnimalEmpty).empty) continue
+          const full = a as AnimalFull
 
-          const psec = a.generation?.perSecond ?? null
+          if (q.mutation && full.mutation !== q.mutation) continue
+          if (q.rarity && full.rarity !== q.rarity) continue
+
+          const psec = full.generation?.perSecond ?? null
           if (min !== null) {
             if (psec === null || psec < min) continue
           } else {
@@ -140,11 +147,11 @@ export class PlotStream {
 
           out.push({
             plotSign: plot.plotSign,
-            index: a.index,
-            displayName: a.displayName,
-            mutation: a.mutation,
-            rarity: a.rarity,
-            generation: { raw: a.generation.raw, perSecond: psec },
+            index: full.index,
+            displayName: full.displayName,
+            mutation: full.mutation,
+            rarity: full.rarity,
+            generation: { raw: full.generation.raw, perSecond: psec },
             timestamp: plot.meta.timestamp,
           })
         }
@@ -155,38 +162,40 @@ export class PlotStream {
   }
 
   /** Envía al/los webhooks de Discord con la regla:
-   * - Si hay ≥ 8M/s en la base -> SOLO webhook2 (VIP) y se mandan todos los hallazgos relevantes.
+   * - Si hay ≥ 8M/s en el lote -> SOLO webhook VIP (8m).
    * - Si NO hay ≥ 8M/s -> SOLO webhook principal (normal).
+   * Si no hay VIP configurado pero sí ≥ 8M/s, hace fallback al principal (con aviso).
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
-    const hookMain = env.get('DISCORD_WEBHOOK')   // normal (≥1M; secrets ≥200k)
-    const hookVip  = env.get('DISCORD_WEBHOOK2')  // VIP (trigger si hay ≥8M)
+    const hookMain = env.get('DISCORD_WEBHOOK') // normal
+    const hookVip = env.get('DISCORD_WEBHOOK_8M') || env.get('DISCORD_WEBHOOK2') // VIP
 
-    // --- Construir lista base de animales con perSecond numérico ---
-    const items: { name: string; p: number; plot: string }[] = []
+    // Construir items con numeric perSecond y conservar rarity/plot
+    const items: { name: string; p: number; plot: string; rarity?: string }[] = []
     for (const plot of plots) {
-      for (const a of plot.animalPodiums) {
-        if (a.empty) continue
-        const p = a.generation.perSecond
+      for (const ap of plot.animalPodiums) {
+        if ((ap as AnimalEmpty).empty) continue
+        const a = ap as AnimalFull
+        const p = a.generation?.perSecond
         if (typeof p === 'number') {
-          const rarityPart = a.rarity ? ` (${a.rarity})` : ''
           items.push({
-            name: `${a.displayName}${rarityPart}`,
+            name: a.displayName,
             p,
             plot: plot.plotSign,
+            rarity: a.rarity,
           })
         }
       }
     }
 
-    // Si no hay nada con número, avisa al principal y sal
+    // Si no hay perSecond numérico, avisa al principal (si existe) y sal
     if (!items.length) {
       if (hookMain) {
         await this.safePost(hookMain, {
           embeds: [
             {
               title: 'SauPetNotify',
-              description: `❌ No hay animales con perSecond numérico en la base`,
+              description: '❌ No hay animales con perSecond numérico en la base',
               color: 0xff0000,
               footer: { text: `SauPetNotify • ${new Date().toLocaleString()}` },
             },
@@ -196,75 +205,83 @@ export class PlotStream {
       return
     }
 
-    // --- Regla normal (relevantes): ≥1M o Secret ≥200k
-    const relevant = items
-      .filter((i) => {
-        const isSecret = i.name.toLowerCase().includes('(secret')
-        return isSecret ? i.p >= 200_000 : i.p >= 1_000_000
-      })
-      .sort((a, b) => b.p - a.p)
-
-    const hasVip = items.some((i) => i.p >= 8_000_000)
+    // Calcular máximos y relevancias
+    const maxPS = items.reduce((m, it) => (it.p > m ? it.p : m), 0)
+    const hasVip = maxPS >= PlotStream.VIP_THRESHOLD
     const footer = { text: `SauPetNotify • ${new Date().toLocaleString()}` }
+
+    // Relevantes para canal normal: normales ≥1M o secrets ≥200k
+    const relevantNormal = items
+      .filter((i) =>
+        i.rarity === 'Secret' ? i.p >= PlotStream.SECRET_MIN : i.p >= PlotStream.NORMAL_MIN
+      )
+      .sort((a, b) => b.p - a.p)
 
     // ======================
     //  Modo VIP exclusivo
     // ======================
-    if (hasVip && hookVip) {
-      // Mandamos "todo eso" (los relevantes) únicamente al VIP
-      const fieldsVip = (relevant.length ? relevant : items) // si por alguna razón no hay "relevantes", cae a todos los items
-        .slice(0, 10)
-        .map((i) => ({
-          name: i.name,
-          value: `💎 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
-          inline: false,
-        }))
+    if (hasVip) {
+      const fieldsVip = (relevantNormal.length ? relevantNormal : items).slice(0, 10).map((i) => ({
+        name: i.rarity ? `${i.name} (${i.rarity})` : i.name,
+        value: `💎 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
+        inline: false,
+      }))
 
-      await this.safePost(hookVip, {
-        embeds: [
-          {
-            title: 'SauPetNotify — VIP (≥8M/s detectado)',
-            color: 0xf1c40f, // dorado
-            fields: [
-              ...fieldsVip,
-              {
-                name: '🆔 Job ID',
-                value: `\`\`\`${jobId}\`\`\``,
-                inline: false,
-              },
-            ],
-            footer,
-          },
-        ],
-        components: [
-          {
-            type: 1,
-            components: [
-              {
-                type: 2,
-                style: 2,
-                label: '📋 Copiar JobId',
-                custom_id: `copy_${jobId}`,
-              },
-            ],
-          },
-        ],
-      })
-
-      // IMPORTANTE: no mandamos nada al hook principal cuando hay VIP
+      if (hookVip) {
+        await this.safePost(hookVip, {
+          embeds: [
+            {
+              title: 'SauPetNotify — VIP (≥8M/s detectado)',
+              color: 0xf1c40f,
+              fields: [
+                ...fieldsVip,
+                { name: '🆔 Job ID', value: `\`\`\`${jobId}\`\`\``, inline: false },
+                { name: 'Max/s', value: this.human(maxPS), inline: true },
+              ],
+              footer,
+            },
+          ],
+          components: [
+            {
+              type: 1,
+              components: [
+                { type: 2, style: 2, label: '📋 Copiar JobId', custom_id: `copy_${jobId}` },
+              ],
+            },
+          ],
+        })
+        return
+      } else if (hookMain) {
+        // Fallback si falta hook VIP
+        await this.safePost(hookMain, {
+          embeds: [
+            {
+              title: 'SauPetNotify — VIP (fallback: falta DISCORD_WEBHOOK_8M)',
+              color: 0xf39c12,
+              fields: [
+                ...fieldsVip,
+                { name: '🆔 Job ID', value: `\`\`\`${jobId}\`\`\``, inline: false },
+                { name: 'Max/s', value: this.human(maxPS), inline: true },
+              ],
+              footer,
+            },
+          ],
+        })
+        return
+      }
       return
     }
 
     // ======================
-    //  Modo normal (no hay ≥8M/s)
+    //  Modo normal
     // ======================
     if (hookMain) {
-      if (!relevant.length) {
+      if (!relevantNormal.length) {
         await this.safePost(hookMain, {
           embeds: [
             {
               title: 'PetNotify',
-              description: `❌ No hay animales Secret ≥200k/s ni normales ≥1M/s`,
+              description: '❌ No hay animales Secret ≥200k/s ni normales ≥1M/s',
               color: 0xff0000,
               footer,
             },
@@ -273,8 +290,8 @@ export class PlotStream {
         return
       }
 
-      const fields = relevant.slice(0, 10).map((i) => ({
-        name: i.name,
+      const fields = relevantNormal.slice(0, 10).map((i) => ({
+        name: i.rarity ? `${i.name} (${i.rarity})` : i.name,
         value: `💰 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
         inline: false,
       }))
@@ -286,11 +303,7 @@ export class PlotStream {
             color: 0x2ecc71,
             fields: [
               ...fields,
-              {
-                name: '🆔 Job ID',
-                value: `\`\`\`${jobId}\`\`\``,
-                inline: false,
-              },
+              { name: '🆔 Job ID', value: `\`\`\`${jobId}\`\`\``, inline: false },
             ],
             footer,
           },
@@ -299,12 +312,7 @@ export class PlotStream {
           {
             type: 1,
             components: [
-              {
-                type: 2,
-                style: 2,
-                label: '📋 Copiar JobId',
-                custom_id: `copy_${jobId}`,
-              },
+              { type: 2, style: 2, label: '📋 Copiar JobId', custom_id: `copy_${jobId}` },
             ],
           },
         ],
@@ -316,9 +324,8 @@ export class PlotStream {
   private async safePost(url: string, payload: any) {
     try {
       await axios.post(url, payload)
-    } catch (err) {
-      // Puedes loguearlo si quieres:
-      // console.error('Discord webhook error:', (err as any)?.message ?? err)
+    } catch {
+      // log si quieres
     }
   }
 
