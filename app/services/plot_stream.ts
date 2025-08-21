@@ -154,19 +154,18 @@ export class PlotStream {
     return out
   }
 
-  /** Envía al webhook (ya sin concatenar /jobId) */
+  /** Envía al/los webhooks de Discord */
   async emitToDiscord(jobId: string, plots: Plot[]) {
-    const base = env.get('DISCORD_WEBHOOK')
-    if (!base) return
+    const hookMain = env.get('DISCORD_WEBHOOK') // normal (≥1M; secrets ≥200k)
+    const hookVip = env.get('DISCORD_WEBHOOK2') // VIP (≥8M)
 
-    // Armar lista de animales (sin mutation)
+    // --- Construir lista base de animales con perSecond numérico ---
     const items: { name: string; p: number; plot: string }[] = []
     for (const plot of plots) {
       for (const a of plot.animalPodiums) {
         if (a.empty) continue
         const p = a.generation.perSecond
         if (typeof p === 'number') {
-          // 👇 solo rarity, sin mutation
           const rarityPart = a.rarity ? ` (${a.rarity})` : ''
           items.push({
             name: `${a.displayName}${rarityPart}`,
@@ -177,66 +176,121 @@ export class PlotStream {
       }
     }
 
-    // Filtrar según reglas
-    const filtered = items.filter((i) => {
-      const isSecret = i.name.toLowerCase().includes('(secret')
-      if (isSecret) {
-        return i.p >= 200_000
-      }
-      return i.p >= 1_000_000
-    })
+    // --- Filtrado normal (mismo comportamiento que tenías) ---
+    const normalFiltered = items
+      .filter((i) => {
+        const isSecret = i.name.toLowerCase().includes('(secret')
+        return isSecret ? i.p >= 200_000 : i.p >= 1_000_000
+      })
+      .sort((a, b) => b.p - a.p)
 
-    if (!filtered.length) {
-      await axios.post(base, {
+    // --- Filtrado VIP (≥ 8M/s) ---
+    const vipFiltered = items.filter((i) => i.p >= 8_000_000).sort((a, b) => b.p - a.p)
+
+    const footer = { text: `SauPetNotify • ${new Date().toLocaleString()}` }
+
+    // --- Envío al webhook principal (si está configurado) ---
+    if (hookMain) {
+      if (!normalFiltered.length) {
+        await this.safePost(hookMain, {
+          embeds: [
+            {
+              title: 'SauPetNotify',
+              description: `❌ No hay animales Secret ≥200k/s ni normales ≥1M/s`,
+              color: 0xff0000,
+              footer,
+            },
+          ],
+        })
+      } else {
+        const fields = normalFiltered.slice(0, 10).map((i) => ({
+          name: i.name,
+          value: `💰 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
+          inline: false,
+        }))
+
+        await this.safePost(hookMain, {
+          embeds: [
+            {
+              title: 'SauPetNotify',
+              color: 0x2ecc71,
+              fields: [
+                ...fields,
+                {
+                  name: '🆔 Job ID',
+                  value: `\`\`\`${jobId}\`\`\``,
+                  inline: false,
+                },
+              ],
+              footer,
+            },
+          ],
+          components: [
+            {
+              type: 1,
+              components: [
+                {
+                  type: 2,
+                  style: 2,
+                  label: '📋 Copiar JobId',
+                  custom_id: `copy_${jobId}`,
+                },
+              ],
+            },
+          ],
+        })
+      }
+    }
+
+    // --- Envío VIP al segundo webhook (si hay ≥8M y está configurado) ---
+    if (hookVip && vipFiltered.length) {
+      const fieldsVip = vipFiltered.slice(0, 10).map((i) => ({
+        name: i.name,
+        value: `💎 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
+        inline: false,
+      }))
+
+      await this.safePost(hookVip, {
         embeds: [
           {
-            title: 'SauPetNotify',
-            description: `❌ No hay animales Secret ≥200k/s ni normales ≥1M/s`,
-            color: 0xff0000,
-            footer: { text: `SauPetNotify • ${new Date().toLocaleString()}` },
+            title: 'SauPetNotify — VIP (≥8M/s)',
+            color: 0xf1c40f, // dorado
+            fields: [
+              ...fieldsVip,
+              {
+                name: '🆔 Job ID',
+                value: `\`\`\`${jobId}\`\`\``,
+                inline: false,
+              },
+            ],
+            footer,
+          },
+        ],
+        components: [
+          {
+            type: 1,
+            components: [
+              {
+                type: 2,
+                style: 2,
+                label: '📋 Copiar JobId',
+                custom_id: `copy_${jobId}`,
+              },
+            ],
           },
         ],
       })
-      return
     }
+  }
 
-    // Construir campos del embed
-    const fields = filtered.slice(0, 10).map((i) => ({
-      name: i.name,
-      value: `💰 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
-      inline: false,
-    }))
-
-    await axios.post(base, {
-      embeds: [
-        {
-          title: 'SauPetNotify',
-          color: 0x2ecc71,
-          fields: [
-            ...fields,
-            {
-              name: '🆔 Job ID',
-              value: `\`\`\`${jobId}\`\`\``,
-              inline: false,
-            },
-          ],
-          footer: { text: `SauPetNotify • ${new Date().toLocaleString()}` },
-        },
-      ],
-      components: [
-        {
-          type: 1,
-          components: [
-            {
-              type: 2,
-              style: 2,
-              label: '📋 Copiar JobId',
-              custom_id: `copy_${jobId}`,
-            },
-          ],
-        },
-      ],
-    })
+  /** POST con try/catch para no romper el flujo si un webhook falla */
+  private async safePost(url: string, payload: any) {
+    try {
+      await axios.post(url, payload)
+    } catch (err) {
+      // Puedes loguearlo si quieres:
+      // console.error('Discord webhook error:', (err as any)?.message ?? err)
+    }
   }
 
   private human(n: number): string {
