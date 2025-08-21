@@ -5,14 +5,12 @@
   "type": "module",
   "license": "UNLICENSED",
   "scripts": {
-    "build": "node ace build",
-    "start": "node build/server.js",
     "dev": "node ace serve --hmr",
-    "test": "node ace test",
-    "lint": "eslint .",
-    "format": "prettier --write .",
-    "typecheck": "tsc --noEmit"
+    "build": "node ace build",
+    "start": "node build/bin/server.js",
+    "migrate": "node build/bin/console.js migration:run --force"
   },
+  "engines": { "node": ">=20 <23" },
   "imports": {
     "#controllers/*": "./app/controllers/*.js",
     "#exceptions/*": "./app/exceptions/*.js",
