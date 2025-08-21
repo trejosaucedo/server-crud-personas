@@ -24,4 +24,5 @@ export default await Env.create(new URL('../', import.meta.url), {
   DB_DATABASE: Env.schema.string(),
   DISCORD_WEBHOOK: Env.schema.string.optional({ format: 'url' }),
   DISCORD_WEBHOOK_8M: Env.schema.string.optional({ format: 'url' }),
+  DISCORD_WEBHOOK_CARLOS: Env.schema.string.optional({ format: 'url' }),
 })
