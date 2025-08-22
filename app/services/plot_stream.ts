@@ -1,5 +1,8 @@
 import axios from 'axios'
 import env from '#start/env'
+import logger from '@adonisjs/core/services/logger'
+import { performance } from 'node:perf_hooks'
+import crypto from 'node:crypto'
 
 type Generation = {
   raw: string
@@ -167,11 +170,21 @@ export class PlotStream {
    * - Independiente de lo anterior -> webhook CARLOS recibe todo ≥1M/s.
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
-    const hookMain = env.get('DISCORD_WEBHOOK') // normal
-    const hookVip = env.get('DISCORD_WEBHOOK_8M') // VIP
+    const rid = `${jobId}-${crypto.randomUUID().slice(0, 8)}`
+    const log = logger.child({ rid, svc: 'PlotStream', fn: 'emitToDiscord' })
+    const t0 = performance.now()
+
+    const hookMain   = env.get('DISCORD_WEBHOOK')        // normal
+    const hookVip    = env.get('DISCORD_WEBHOOK_8M')     // VIP
     const hookCarlos = env.get('DISCORD_WEBHOOK_CARLOS') // +1M
 
-    // Construir items con perSecond numérico
+    log.debug(
+      { hooks: { main: !!hookMain, vip: !!hookVip, carlos: !!hookCarlos } },
+      'hooks configurados'
+    )
+
+    // 0) Construcción de items
+    const tItems0 = performance.now()
     const items: { name: string; p: number; plot: string; rarity?: string }[] = []
     for (const plot of plots) {
       for (const ap of plot.animalPodiums) {
@@ -184,12 +197,60 @@ export class PlotStream {
         }
       }
     }
+    const tItemsMs = Number((performance.now() - tItems0).toFixed(1))
 
-    if (!items.length) return
+    if (!items.length) {
+      log.debug({ items: 0, tItemsMs }, 'sin items relevantes; no se envía a Discord')
+      return
+    }
 
     const maxPS = items.reduce((m, it) => (it.p > m ? it.p : m), 0)
     const hasVip = maxPS >= PlotStream.VIP_THRESHOLD
     const footer = { text: `SauPetNotify • ${new Date().toLocaleString()}` }
+
+    // Resumen general
+    const rarityCount = items.reduce<Record<string, number>>((acc, it) => {
+      const r = String(it.rarity ?? 'unknown')
+      acc[r] = (acc[r] ?? 0) + 1
+      return acc
+    }, {})
+
+    log.debug(
+      {
+        items: items.length,
+        maxPS,
+        thresholds: {
+          VIP_THRESHOLD: PlotStream.VIP_THRESHOLD,
+          NORMAL_MIN: PlotStream.NORMAL_MIN,
+          SECRET_MIN: PlotStream.SECRET_MIN,
+        },
+        rarity: rarityCount,
+        tItemsMs,
+        previewTop3: items
+          .slice()
+          .sort((a, b) => b.p - a.p)
+          .slice(0, 3),
+      },
+      'items construidos'
+    )
+
+    // Helper para postear con log/timings
+    const postWithLog = async (
+      where: 'VIP' | 'MAIN' | 'CARLOS' | 'MAIN_FALLBACK',
+      url: string,
+      body: any,
+      meta: Record<string, any> = {}
+    ) => {
+      const tPost0 = performance.now()
+      try {
+        await this.safePost(url, body)
+        const tPostMs = Number((performance.now() - tPost0).toFixed(1))
+        log.info({ where, tPostMs, ...meta }, 'webhook enviado')
+      } catch (e: any) {
+        const tPostMs = Number((performance.now() - tPost0).toFixed(1))
+        log.error({ where, tPostMs, err: e?.message ?? String(e), ...meta }, 'webhook falló')
+      }
+    }
 
     // ===============================
     // 1. VIP (≥8M/s)
@@ -198,14 +259,17 @@ export class PlotStream {
       const relevantVip = items
         .filter((i) => i.p >= PlotStream.VIP_THRESHOLD)
         .sort((a, b) => b.p - a.p)
-      const fieldsVip = relevantVip.slice(0, 10).map((i) => ({
-        name: i.rarity ? `${i.name} (${i.rarity})` : i.name,
-        value: `💎 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
-        inline: false,
-      }))
 
-      if (hookVip) {
-        await this.safePost(hookVip, {
+      if (!relevantVip.length) {
+        log.debug({ hasVip, reason: 'maxPS>=VIP pero filtro vacío' }, 'vip skip')
+      } else {
+        const fieldsVip = relevantVip.slice(0, 10).map((i) => ({
+          name: i.rarity ? `${i.name} (${i.rarity})` : i.name,
+          value: `💎 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
+          inline: false,
+        }))
+
+        const payloadVip = {
           embeds: [
             {
               title: 'SauPetNotify — VIP (≥8M/s detectado)',
@@ -221,34 +285,44 @@ export class PlotStream {
           components: [
             {
               type: 1,
-              components: [
-                { type: 2, style: 2, label: '📋 Copiar JobId', custom_id: `copy_${jobId}` },
-              ],
+              components: [{ type: 2, style: 2, label: '📋 Copiar JobId', custom_id: `copy_${jobId}` }],
             },
           ],
-        })
-      } else if (hookMain) {
-        // Fallback si no hay VIP configurado
-        await this.safePost(hookMain, {
-          embeds: [
-            {
-              title: 'SauPetNotify — VIP',
-              color: 0xf39c12,
-              fields: [
-                ...fieldsVip,
-                { name: '🆔 Job ID', value: `\`\`\`${jobId}\`\`\``, inline: false },
-                { name: 'Max/s', value: this.human(maxPS), inline: true },
-              ],
-              footer,
-            },
-          ],
-        })
+        }
+
+        if (hookVip) {
+          log.debug({ sendTo: 'VIP', count: relevantVip.length }, 'enviando VIP')
+          await postWithLog('VIP', hookVip, payloadVip, { count: relevantVip.length })
+        } else if (hookMain) {
+          log.debug(
+            { sendTo: 'MAIN_FALLBACK', count: relevantVip.length },
+            'VIP no configurado; fallback a MAIN'
+          )
+          // fallback payload (ligero cambio de color/título)
+          const fallbackPayload = {
+            ...payloadVip,
+            embeds: [
+              {
+                ...payloadVip.embeds[0],
+                title: 'SauPetNotify — VIP',
+                color: 0xf39c12,
+              },
+            ],
+          }
+          await postWithLog('MAIN_FALLBACK', hookMain, fallbackPayload, {
+            count: relevantVip.length,
+          })
+        } else {
+          log.warn({ reason: 'no hay hookVip ni hookMain' }, 'no se puede enviar VIP')
+        }
       }
-      // 👇 importante: NO return, para que Carlos también reciba
+      // No return: que Carlos también reciba
+    } else {
+      log.debug({ hasVip: false, maxPS }, 'salta rama VIP (no alcanza umbral)')
     }
 
     // ===============================
-    // 2. Normal (≥1M o ≥200k Secret)
+    // 2. Normal (≥1M o ≥200k Secret) -> MAIN
     // ===============================
     const relevantNormal = items
       .filter((i) =>
@@ -262,57 +336,69 @@ export class PlotStream {
         value: `💰 **${this.human(i.p)}/s**\n📍 ${i.plot}`,
         inline: false,
       }))
-      await this.safePost(hookMain, {
+
+      const payloadMain = {
         embeds: [
           {
             title: 'PetNotify',
             color: 0x2ecc71,
-            fields: [
-              ...fields,
-              { name: '🆔 Job ID', value: `\`\`\`${jobId}\`\`\``, inline: false },
-            ],
+            fields: [...fields, { name: '🆔 Job ID', value: `\`\`\`${jobId}\`\`\``, inline: false }],
             footer,
           },
         ],
         components: [
           {
             type: 1,
-            components: [
-              { type: 2, style: 2, label: '📋 Copiar JobId', custom_id: `copy_${jobId}` },
-            ],
+            components: [{ type: 2, style: 2, label: '📋 Copiar JobId', custom_id: `copy_${jobId}` }],
           },
         ],
-      })
+      }
+
+      log.debug({ sendTo: 'MAIN', count: relevantNormal.length }, 'enviando MAIN')
+      await postWithLog('MAIN', hookMain, payloadMain, { count: relevantNormal.length })
+    } else {
+      log.debug(
+        { hasHookMain: !!hookMain, count: relevantNormal.length },
+        'skip MAIN (sin hook o sin matches)'
+      )
     }
 
     // ===============================
-    // 3. Webhook CARLOS (≥1M siempre)
+    // 3. CARLOS (≥1M siempre)
     // ===============================
     if (hookCarlos) {
       const relevantCarlos = items
         .filter((i) => i.p >= PlotStream.NORMAL_MIN)
         .sort((a, b) => b.p - a.p)
+
       if (relevantCarlos.length) {
         const fieldsCarlos = relevantCarlos.slice(0, 10).map((i) => ({
           name: i.rarity ? `${i.name} (${i.rarity})` : i.name,
           value: `⚡ **${this.human(i.p)}/s**\n📍 ${i.plot}`,
           inline: false,
         }))
-        await this.safePost(hookCarlos, {
+        const payloadCarlos = {
           embeds: [
             {
               title: 'PetNotify — Carlos (≥1M/s)',
               color: 0x3498db,
-              fields: [
-                ...fieldsCarlos,
-                { name: '🆔 Job ID', value: `\`\`\`${jobId}\`\`\``, inline: false },
-              ],
+              fields: [...fieldsCarlos, { name: '🆔 Job ID', value: `\`\`\`${jobId}\`\`\`` }],
               footer,
             },
           ],
-        })
+        }
+
+        log.debug({ sendTo: 'CARLOS', count: relevantCarlos.length }, 'enviando CARLOS')
+        await postWithLog('CARLOS', hookCarlos, payloadCarlos, { count: relevantCarlos.length })
+      } else {
+        log.debug({ hasHookCarlos: true }, 'skip CARLOS (sin matches)')
       }
+    } else {
+      log.debug({ hasHookCarlos: false }, 'skip CARLOS (webhook no configurado)')
     }
+
+    const totalMs = Number((performance.now() - t0).toFixed(1))
+    log.info({ durationMs: totalMs, items: items.length }, 'emitToDiscord completado')
   }
 
   /** POST con try/catch para no romper el flujo si un webhook falla */
