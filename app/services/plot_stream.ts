@@ -41,15 +41,14 @@ export class PlotStream {
 
   // === UMBRALES ===
   private static MIN_NON_SECRET = 1_000_000 // no-secret desde 1M/s
-  private static RAINBOW_5M = 5_000_000 // +5M => sección RAINBOW
-  private static MAX_PER_SECTION = 10 // tope visual por sección
+  private static RAINBOW_5M = 5_000_000 // sección RAINBOW
+  private static MAX_PER_SECTION = 10 // tope por sección
 
   static getInstance() {
     if (!this.instance) this.instance = new PlotStream()
     return this.instance
   }
 
-  /** Inserta un payload (UN job por lote) */
   pushPayload(payload: JobPayload) {
     const now = Date.now()
     this.buffer.push({
@@ -61,36 +60,28 @@ export class PlotStream {
     this.gc(now)
   }
 
-  /** Devuelve todos los plots recientes (aplanado) */
   dump(): Plot[] {
-    const now = Date.now()
-    this.gc(now)
+    this.gc(Date.now())
     const out: Plot[] = []
     for (const chunk of this.buffer) out.push(...chunk.plots)
     return out
   }
 
-  /** Si quieres ver los jobs con su metadata */
   dumpJobs(): JobPayload[] {
-    const now = Date.now()
-    this.gc(now)
+    this.gc(Date.now())
     return this.buffer.map((b) => ({ jobId: b.jobId, generatedAt: b.generatedAt, plots: b.plots }))
   }
 
-  /** Limpieza por TTL */
   private gc(now = Date.now()) {
     const minTs = now - this.ttlMs
     this.buffer = this.buffer.filter((e) => e.at >= minTs)
   }
 
-  /** Convierte "10m", "12.5m", "1b", "750k", o número a perSecond */
   parseHumanMoney(input: string | number | undefined): number | null {
     if (input === undefined || input === null) return null
     if (typeof input === 'number') return Number.isFinite(input) ? input : null
-
     const raw = String(input).trim().toLowerCase()
     if (raw === '') return null
-
     const m = raw.match(/^(\d+(?:\.\d+)?)([kmbt])$/i)
     if (m) {
       const num = Number.parseFloat(m[1])
@@ -99,16 +90,11 @@ export class PlotStream {
         suf === 'k' ? 1e3 : suf === 'm' ? 1e6 : suf === 'b' ? 1e9 : suf === 't' ? 1e12 : 1
       return num * mult
     }
-
     const asNum = Number(raw)
     if (!Number.isNaN(asNum)) return asNum
-
     return null
   }
 
-  /**
-   * Filtro por mutation, rarity y mínimo perSecond (ignora READY!/null)
-   */
   filter(q: FilterQuery) {
     const min = q.minPerSecond ?? null
     const out: Array<{
@@ -120,23 +106,19 @@ export class PlotStream {
       generation: { raw: string; perSecond: number | null }
       timestamp: string
     }> = []
-
     for (const chunk of this.buffer) {
       for (const plot of chunk.plots) {
         for (const a of plot.animalPodiums) {
           if ((a as AnimalEmpty).empty) continue
           const full = a as AnimalFull
-
           if (q.mutation && full.mutation !== q.mutation) continue
           if (q.rarity && full.rarity !== q.rarity) continue
-
           const psec = full.generation?.perSecond ?? null
           if (min !== null) {
             if (psec === null || psec < min) continue
           } else {
             if (psec === null) continue
           }
-
           out.push({
             plotSign: plot.plotSign,
             index: full.index,
@@ -149,26 +131,25 @@ export class PlotStream {
         }
       }
     }
-
     return out
   }
 
   /**
-   * Un SOLO embed por ingest para ambos webhooks:
-   * - Secret: SIEMPRE (cualquier cantidad).
-   * - No-secret: solo ≥ 1M/s.
-   * - ≥ 5M/s => sección RAINBOW con nombre en verde (ANSI).
+   * Un SOLO embed por ingest, mismo payload para MAIN y CARLOS:
+   * - Secret: siempre (cualquier cantidad)
+   * - No-secret: ≥ 1M/s
+   * - ≥ 5M/s: sección RAINBOW (arriba) con nombre en verde
+   * - No-secret se agrupan por rarity (ej. Brainrot God)
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
-    const hookMain = env.get('DISCORD_WEBHOOK') // normal
-    const hookCarlos = env.get('DISCORD_WEBHOOK_CARLOS') // mismo payload
+    const hookMain = env.get('DISCORD_WEBHOOK')
+    const hookCarlos = env.get('DISCORD_WEBHOOK_CARLOS')
     const targets = [hookMain, hookCarlos].filter(Boolean) as string[]
     if (!targets.length) return
 
     type Item = { name: string; p: number; plot: string; rarity?: string }
     const items: Item[] = []
 
-    // Secret: siempre. No-secret: >= 1M
     for (const plot of plots) {
       for (const ap of plot.animalPodiums) {
         const anyAp = ap as any
@@ -176,7 +157,6 @@ export class PlotStream {
         const a = ap as AnimalFull
         const p = a.generation?.perSecond
         if (typeof p !== 'number') continue
-
         if (a.rarity === 'Secret' || p >= PlotStream.MIN_NON_SECRET) {
           items.push({ name: a.displayName, p, plot: plot.plotSign, rarity: a.rarity })
         }
@@ -184,8 +164,8 @@ export class PlotStream {
     }
     if (!items.length) return
 
-    // Orden y grupos
     items.sort((a, b) => b.p - a.p)
+
     const rainbow = items.filter((i) => i.p >= PlotStream.RAINBOW_5M)
     const secrets = items.filter((i) => i.rarity === 'Secret')
     const normals = items.filter(
@@ -193,7 +173,7 @@ export class PlotStream {
         i.rarity !== 'Secret' && i.p >= PlotStream.MIN_NON_SECRET && i.p < PlotStream.RAINBOW_5M
     )
 
-    // Limitar por sección (evitar embeds enormes)
+    // Helper para limitar
     const cap = <T>(arr: T[]) => {
       const max = PlotStream.MAX_PER_SECTION
       return { head: arr.slice(0, max), overflow: Math.max(arr.length - max, 0) }
@@ -201,17 +181,18 @@ export class PlotStream {
 
     const fields: any[] = []
 
+    // RAINBOW primero
     if (rainbow.length) {
       const { head, overflow } = cap(rainbow)
-      // nombre en verde (ANSI) + línea simple con p/s y plot
       const valueParts = head.map((i) => {
-        const greenName = `\u001b[0;32m${i.name}\u001b[0m`
-        return `\`\`\`ansi\n${greenName}\n\`\`\`\n${this.human(i.p)}/s — ${i.plot}`
+        const green = `\u001b[0;32m${i.name}\u001b[0m`
+        return `\`\`\`ansi\n${green}\n\`\`\`\n${this.human(i.p)}/s — ${i.plot}`
       })
       if (overflow) valueParts.push(`… y **${overflow}** más`)
       fields.push({ name: 'RAINBOW (≥5M/s)', value: valueParts.join('\n\n'), inline: false })
     }
 
+    // Secretos
     if (secrets.length) {
       const { head, overflow } = cap(secrets)
       const valueParts = head.map(
@@ -221,18 +202,36 @@ export class PlotStream {
       fields.push({ name: 'SECRETO(S)', value: valueParts.join('\n'), inline: false })
     }
 
+    // No-secret agrupados por rarity
     if (normals.length) {
-      const { head, overflow } = cap(normals)
-      const valueParts = head.map((i) => `• ${i.name} — ${this.human(i.p)}/s — ${i.plot}`)
-      if (overflow) valueParts.push(`… y **${overflow}** más`)
-      fields.push({ name: '+1M/s', value: valueParts.join('\n'), inline: false })
+      const byRarity = normals.reduce<Record<string, Item[]>>((acc, it) => {
+        const key = it.rarity && it.rarity.trim() ? it.rarity : 'Otros'
+        ;(acc[key] ||= []).push(it)
+        return acc
+      }, {})
+
+      // Ordena grupos por su mejor p/s desc para que lo top salga arriba
+      const ordered = Object.entries(byRarity).sort((a, b) => {
+        const maxA = Math.max(...a[1].map((x) => x.p))
+        const maxB = Math.max(...b[1].map((x) => x.p))
+        return maxB - maxA
+      })
+
+      for (const [rarity, list] of ordered) {
+        list.sort((a, b) => b.p - a.p)
+        const { head, overflow } = cap(list)
+        const valueParts = head.map((i) => `• ${i.name} — ${this.human(i.p)}/s — ${i.plot}`)
+        if (overflow) valueParts.push(`… y **${overflow}** más`)
+        fields.push({ name: rarity, value: valueParts.join('\n'), inline: false })
+      }
     }
 
+    // JobId
     fields.push({ name: 'Job ID', value: `\`\`\`${jobId}\`\`\`` })
 
     const embed = {
       title: 'PetNotify',
-      color: rainbow.length ? 0x2ecc71 : 0x95a5a6, // acento discreto
+      color: rainbow.length ? 0x2ecc71 : 0x95a5a6,
       description: [
         secrets.length ? `**Secretos:** ${secrets.length}` : null,
         `**Total:** ${items.length}`,
@@ -247,13 +246,10 @@ export class PlotStream {
     await Promise.all(targets.map((url) => this.safePost(url, payload)))
   }
 
-  /** POST con try/catch para no romper el flujo si un webhook falla */
   private async safePost(url: string, payload: any) {
     try {
       await axios.post(url, payload)
-    } catch {
-      // silencioso
-    }
+    } catch {}
   }
 
   private human(n: number): string {
