@@ -333,7 +333,7 @@ export class PlotStream {
     }
 
     // ===== Meta del embed =====
-    const title = opts?.scopeBadge ? `PetNotify • ${opts.scopeBadge}` : 'PetNotify'
+    const title = opts?.scopeBadge ? `SauNotify • ${opts.scopeBadge}` : 'SauNotify'
     const color = opts?.forceEmbedColorBlue
       ? PlotStream.COLOR_5M_ONLY
       : opts?.tintHas5m && has5m
@@ -387,11 +387,11 @@ export class PlotStream {
       description,
       fields: [] as any[],
       footer: {
-        text: `SauPetNotify • ${new Intl.DateTimeFormat('es-MX', {
+        text: `SauNotify • ${new Intl.DateTimeFormat('es-MX', {
           dateStyle: 'short',
           timeStyle: 'medium',
           timeZone: 'America/Monterrey',
-        }).format(new Date())} America/Monterrey`,
+        }).format(new Date())} America/Monterrey • by qsau`,
       },
     }
   }
