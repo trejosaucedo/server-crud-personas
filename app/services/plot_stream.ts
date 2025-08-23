@@ -39,14 +39,14 @@ export class PlotStream {
   private buffer: { at: number; jobId: string; generatedAt: string; plots: Plot[] }[] = []
   private ttlMs = 60_000
 
-  // ====== UMBRALES Y ESTILO ======
-  private static MIN_NON_SECRET = 300_000 // TODOS los hooks: no-secret desde 300k/s
-  private static RAINBOW_5M = 5_000_000 // 5M+: destacados y hook especial
+  // ====== UMBRALES Y COLORES ======
+  private static MIN_NON_SECRET = 300_000 // >= 300k/s en TODOS los hooks
+  private static RAINBOW_5M = 5_000_000 // 5M+
   private static COLOR_DEFAULT = 0x95a5a6
-  private static COLOR_RAINBOW = 0x2ecc71 // si hay ≥5M/s en el embed general
-  private static COLOR_5M_ONLY = 0x0b63ff // azul fuerte para hook 5M
+  private static COLOR_HAS_5M = 0x2ecc71 // color del embed si hay 5M en general
+  private static COLOR_5M_ONLY = 0x0b63ff // color del embed para el hook 5M-only (sin bg en texto)
 
-  // Límites Discord (automático: partimos en múltiples embeds/mensajes)
+  // Límites Discord (se parte auto en varios embeds/mensajes)
   private static MAX_FIELDS_PER_EMBED = 25
   private static MAX_EMBEDS_PER_MESSAGE = 10
   private static MAX_FIELD_VALUE = 1024
@@ -143,9 +143,10 @@ export class PlotStream {
   }
 
   /**
-   * - Hook CARLOS (DISCORD_WEBHOOK_CARLOS): Secretos (siempre) + no-secret ≥ 300k/s
-   * - Hook TEST   (DISCORD_WEBHOOK_TEST):   igual que CARLOS (para validar)
-   * - Hook 5M     (DISCORD_WEBHOOK_5M):     SOLO ≥ 5M/s (azul fuerte + letras blancas con ANSI)
+   * Hooks:
+   * - DISCORD_WEBHOOK_CARLOS: Secret + ≥300k
+   * - DISCORD_WEBHOOK_TEST:   Secret + ≥300k
+   * - DISCORD_WEBHOOK_5M:     SOLO ≥5M (sin background en texto, título +5M)
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
     const hookCarlos = env.get('DISCORD_WEBHOOK_CARLOS')
@@ -167,84 +168,79 @@ export class PlotStream {
     }
     if (!all.length) return
 
-    // === Conjuntos ===
     const eligible300k = all.filter(
       (i) => i.rarity === 'Secret' || i.p >= PlotStream.MIN_NON_SECRET
     )
     const only5m = all.filter((i) => i.p >= PlotStream.RAINBOW_5M)
 
-    // === CARLOS / TEST (≥300k + secretos) ===
+    // === CARLOS / TEST: Secret + ≥300k ===
     if (eligible300k.length) {
-      const embeds = this.buildEmbedsPretty(jobId, eligible300k, { strongBlueHeaderIfHas5m: true })
+      const embeds = this.buildEmbedsPretty(jobId, eligible300k, { tintHas5m: true })
       await this.postInChunks([hookCarlos, hookTest].filter(Boolean) as string[], embeds)
     }
 
-    // === 5M ONLY (azul fuerte + ANSI fondo azul/blanco) ===
+    // === 5M ONLY: “+5M” sin fondo, texto blanco ===
     if (only5m.length && hook5m) {
       const embeds5m = this.buildEmbedsPretty(jobId, only5m, {
-        forceBlue: true,
-        titleSuffix: ' • 5M+ ONLY',
-        fiveMAnsiBanner: true,
+        forceEmbedColorBlue: true,
+        fiveMSectionOnly: true,
       })
       await this.postInChunks([hook5m], embeds5m)
     }
   }
 
-  // ===================== RENDER “BONITO” =====================
+  // ===================== RENDER =====================
   private buildEmbedsPretty(
     jobId: string,
     itemsRaw: Array<{ name: string; p: number; plot: string; rarity?: string }>,
     opts?: {
-      titleSuffix?: string
-      strongBlueHeaderIfHas5m?: boolean
-      forceBlue?: boolean
-      fiveMAnsiBanner?: boolean
+      tintHas5m?: boolean // color verde si hay 5M en este embed
+      forceEmbedColorBlue?: boolean // usar color azul fuerte (hook 5M)
+      fiveMSectionOnly?: boolean // mostrar sección +5M arriba y NO mezclar 5M dentro de plots
     }
   ) {
-    let items = [...itemsRaw].sort((a, b) => b.p - a.p)
+    const items = [...itemsRaw].sort((a, b) => b.p - a.p)
     const has5m = items.some((i) => i.p >= PlotStream.RAINBOW_5M)
 
-    // Resumen por rareza (Secretos primero)
+    // Resumen por rareza
     const counts = new Map<string, number>()
-    for (const it of items) {
-      const key = it.rarity === 'Secret' ? 'Secretos' : (it.rarity ?? 'Otros')
-      counts.set(key, (counts.get(key) ?? 0) + 1)
-    }
-    const summaryParts: string[] = []
-    if (counts.has('Secretos')) summaryParts.push(`Secretos ${counts.get('Secretos')}`)
-    const rest = [...counts.entries()]
+    for (const it of items)
+      counts.set(
+        it.rarity === 'Secret' ? 'Secretos' : (it.rarity ?? 'Otros'),
+        (counts.get(it.rarity === 'Secret' ? 'Secretos' : (it.rarity ?? 'Otros')) ?? 0) + 1
+      )
+    const summaryBars: string[] = []
+    if (counts.has('Secretos')) summaryBars.push(`Secretos ${counts.get('Secretos')}`)
+    for (const [k, v] of [...counts.entries()]
+      // eslint-disable-next-line @typescript-eslint/no-shadow
       .filter(([k]) => k !== 'Secretos')
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    for (const [k, v] of rest) summaryParts.push(`${k} ${v}`)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
+      summaryBars.push(`${k} ${v}`)
+    }
 
-    // Top banner 5M+ (si procede) — separamos para no duplicar en grupos
     const top5m = items.filter((i) => i.p >= PlotStream.RAINBOW_5M)
-    const below5m = items.filter((i) => i.p < PlotStream.RAINBOW_5M)
+    const rest = opts?.fiveMSectionOnly ? items.filter((i) => i.p < PlotStream.RAINBOW_5M) : items
 
-    // Agrupar por plot el resto
+    // Agrupar por plot (para “rest”)
     type Group = {
       secrets: Array<{ name: string; p: number }>
       normalsByRarity: Map<string, Array<{ name: string; p: number }>>
     }
     const byPlot = new Map<string, Group>()
-    const pushGroup = (plot: string, rarity: string | undefined, name: string, p: number) => {
-      const g = byPlot.get(plot) ?? { secrets: [], normalsByRarity: new Map() }
-      if (rarity === 'Secret') {
+    for (const it of rest) {
+      const g = byPlot.get(it.plot) ?? { secrets: [], normalsByRarity: new Map() }
+      if (it.rarity === 'Secret') {
         // @ts-ignore
-        g.secrets.push({ name, p })
+        g.secrets.push({ name: it.name, p: it.p })
       } else {
-        const r = rarity && rarity.trim() ? rarity : 'Otros'
+        const r = it.rarity && it.rarity.trim() ? it.rarity : 'Otros'
         const arr = g.normalsByRarity.get(r) ?? []
-        arr.push({ name, p })
+        arr.push({ name: it.name, p: it.p })
         g.normalsByRarity.set(r, arr)
       }
-      byPlot.set(plot, g)
+      byPlot.set(it.plot, g)
     }
-    for (const it of below5m) pushGroup(it.plot, it.rarity, it.name, it.p)
-    // (Si quieres ver también 5M dentro del plot, comenta la siguiente línea y deja que entren con pushGroup)
-    // for (const it of top5m) pushGroup(it.plot, it.rarity, it.name, it.p)
 
-    // Orden plots por mejor p/s
     const orderedPlots = [...byPlot.entries()].sort((a, b) => {
       const bestA = Math.max(
         0,
@@ -259,23 +255,21 @@ export class PlotStream {
       return bestB - bestA
     })
 
-    // ==== Construimos fields ====
+    // ---- fields ----
     const fields: Array<{ name: string; value: string; inline?: boolean }> = []
 
-    // 5M banner (ANSI fondo azul / letra blanca)
-    if (top5m.length) {
+    // +5M (sin fondo, texto blanco)
+    if (top5m.length && opts?.fiveMSectionOnly) {
       const lines = top5m.map((i) =>
-        this.ansiBlueWhite(` ${i.name} — ${this.human(i.p)}/s — ${i.plot} `)
+        this.ansiWhiteBold(` ¬ ${i.name} — ${this.human(i.p)}/s — ${i.plot} `)
       )
-      const block = this.wrapAnsi(lines.join('\n'))
-      fields.push({ name: '⚡ 5M+ DESTACADOS', value: block, inline: false })
+      fields.push({ name: '+5M', value: this.wrapAnsi(lines.join('\n')), inline: false })
     }
 
-    // Por plot
     for (const [plotName, group] of orderedPlots) {
       const lines: string[] = []
 
-      // Secretos (blanco remarcado, ANSI bright white + bold)
+      // Secretos (líneas blancas)
       if (group.secrets.length) {
         const sec = [...group.secrets].sort((a, b) => b.p - a.p)
         const sLines = sec.map((it) => this.ansiWhiteBold(` ¬ ${it.name} — ${this.human(it.p)}/s `))
@@ -292,63 +286,42 @@ export class PlotStream {
 
       for (const [rarity, arr] of orderedRarities) {
         const arrSorted = [...arr].sort((a, b) => b.p - a.p)
+
         if (rarity === 'Brainrot God') {
-          // varios colores (cíclico)
-          const palette = [31, 32, 33, 34, 35, 36, 91, 92, 93, 94, 95, 96] // ANSI fg
-          const colored = arrSorted.map((it, idx) =>
-            this.ansiFg(` ¬ ${it.name} — ${this.human(it.p)}/s `, palette[idx % palette.length])
-          )
-          lines.push('**Brainrot God**')
-          lines.push(this.wrapAnsi(colored.join('\n')))
+          // Título “Brainrot God” arcoíris por letra; ítems sin color
+          lines.push(this.wrapAnsi(this.ansiRainbowLetters('Brainrot God')))
+          for (const it of arrSorted) lines.push(`¬ ${it.name} — \`${this.human(it.p)}/s\``)
         } else {
-          // amarillo para otras rarities
-          const yLines = arrSorted.map((it) =>
-            this.ansiYellow(` ¬ ${it.name} — ${this.human(it.p)}/s `)
-          )
-          lines.push(`**${rarity}**`)
-          lines.push(this.wrapAnsi(yLines.join('\n')))
+          // Título en amarillo; ítems sin color
+          lines.push(this.wrapAnsi(this.ansiYellow(` ${rarity} `)))
+          for (const it of arrSorted) lines.push(`¬ ${it.name} — \`${this.human(it.p)}/s\``)
         }
       }
 
       const value = lines.filter(Boolean).join('\n')
-      if (value.trim().length) {
-        fields.push({ name: `• ${plotName}`, value, inline: false })
-      }
+      if (value.trim().length) fields.push({ name: `• ${plotName}`, value, inline: false })
     }
 
-    // Footer con JobId
+    // JobId
     fields.push({ name: 'Job ID', value: `\`\`\`${jobId}\`\`\``, inline: false })
 
-    // ==== Empaquetar en 1..N embeds y 1..M mensajes (si excede límites) ====
-    const baseTitle = `PetNotify${opts?.titleSuffix ?? ''}`
-    const color = opts?.forceBlue
-      ? PlotStream.COLOR_5M_ONLY
-      : opts?.strongBlueHeaderIfHas5m && has5m
-        ? PlotStream.COLOR_RAINBOW
-        : PlotStream.COLOR_DEFAULT
-
+    // Embed meta
     const description = [
       `**TOTAL:** ${items.length}`,
-      counts.size ? [...summaryPartsToBars(counts)].join(' | ') : null,
+      summaryBars.length ? summaryBars.join(' | ') : null,
     ]
       .filter(Boolean)
       .join('\n')
+    const color = opts?.forceEmbedColorBlue
+      ? PlotStream.COLOR_5M_ONLY
+      : opts?.tintHas5m && has5m
+        ? PlotStream.COLOR_HAS_5M
+        : PlotStream.COLOR_DEFAULT
 
-    function* summaryPartsToBars(map: Map<string, number>) {
-      const parts: string[] = []
-      if (map.has('Secretos')) parts.push(`Secretos ${map.get('Secretos')}`)
-      for (const [k, v] of [...map.entries()]
-        .filter(([k]) => k !== 'Secretos')
-        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
-        parts.push(`${k} ${v}`)
-      }
-      yield* parts
-    }
-
-    return this.packEmbeds(baseTitle, description, color, fields)
+    return this.packEmbeds('PetNotify', description, color, fields)
   }
 
-  // ---- Helpers de empaquetado (split por límites Discord) ----
+  // ---- Empaquetado por límites de Discord ----
   private packEmbeds(
     title: string,
     description: string,
@@ -413,7 +386,6 @@ export class PlotStream {
 
   private async postInChunks(urls: string[], embeds: any[]) {
     if (!urls.length || !embeds.length) return
-    // Discord: máx 10 embeds por mensaje → fragmentamos
     for (const url of urls) {
       let i = 0
       while (i < embeds.length) {
@@ -430,7 +402,7 @@ export class PlotStream {
     } catch {}
   }
 
-  // ---- Estilo ANSI ----
+  // ---- ANSI helpers ----
   private wrapAnsi(s: string) {
     return '```ansi\n' + s + '\n```'
   }
@@ -440,12 +412,21 @@ export class PlotStream {
   private ansiYellow(s: string) {
     return '\u001b[33m' + s + '\u001b[0m'
   }
-  private ansiFg(s: string, code: number) {
-    return `\u001b[${code}m${s}\u001b[0m`
-  }
-  private ansiBlueWhite(s: string) {
-    // Fondo azul fuerte + texto blanco bold
-    return '\u001b[44m\u001b[1;97m' + s + '\u001b[0m'
+
+  // “Brainrot God” arcoíris por letra
+  private ansiRainbowLetters(word: string) {
+    const palette = [91, 93, 92, 96, 94, 95, 31, 33, 32, 36, 34, 35] // rojo, amarillo, verde, cian, azul, magenta (brights + normales)
+    let out = ''
+    let j = 0
+    for (const ch of word.split('')) {
+      if (ch === ' ') {
+        out += ch
+        continue
+      }
+      out += `\u001b[${palette[j % palette.length]}m${ch}\u001b[0m`
+      j++
+    }
+    return out
   }
 
   private human(n: number): string {
