@@ -1,8 +1,7 @@
 import type { HttpContext } from '@adonisjs/core/http'
-import axios from 'axios' // << importar axios
+import axios from 'axios'
 import { plotPayloadValidator } from '#validators/plot'
 import { PlotStream } from '#services/plot_stream'
-import env from '#start/env'
 
 export default class PlotsController {
   private stream = PlotStream.getInstance()
@@ -10,12 +9,15 @@ export default class PlotsController {
   public async ingest({ request, response }: HttpContext) {
     try {
       const payload = await request.validateUsing(plotPayloadValidator)
+
+      // Buffer local (TTL)
       // @ts-ignore
       this.stream.pushPayload(payload)
-      if (env.get('DISCORD_WEBHOOK')) {
-        // @ts-ignore
-        await this.stream.emitToDiscord(payload.jobId, payload.plots)
-      }
+
+      // Siempre intenta emitir (internamente se salta si no hay hooks)
+      // @ts-ignore
+      await this.stream.emitToDiscord(payload.jobId, payload.plots)
+
       return response.json({ success: true, jobId: payload.jobId, received: payload.plots.length })
     } catch (error) {
       return response.status(400).json({
@@ -46,14 +48,12 @@ export default class PlotsController {
     try {
       const placeId = 109983668079237
 
-      // tus microservicios
       const urls = [
         'https://scrapper1-production.up.railway.app/servers',
         'https://scrapper2-production.up.railway.app/servers',
         'https://scrapper3-production.up.railway.app/servers',
       ]
 
-      // Ejecutar todos en paralelo
       const results = await Promise.all(
         urls.map((url) =>
           axios
@@ -63,7 +63,6 @@ export default class PlotsController {
         )
       )
 
-      // Combinar resultados
       const allServers = results.flatMap((r) => (Array.isArray(r.servers) ? r.servers : []))
       const totalFetched = allServers.length
 
