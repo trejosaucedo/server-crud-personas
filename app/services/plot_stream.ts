@@ -39,10 +39,18 @@ export class PlotStream {
   private buffer: { at: number; jobId: string; generatedAt: string; plots: Plot[] }[] = []
   private ttlMs = 60_000
 
-  // === UMBRALES ===
-  private static MIN_NON_SECRET = 1_000_000 // no-secret desde 1M/s
-  private static RAINBOW_5M = 5_000_000 // sección RAINBOW
-  private static MAX_PER_SECTION = 10 // tope por sección
+  // ====== UMBRALES Y ESTILO ======
+  private static MIN_NON_SECRET = 300_000 // TODOS los hooks: no-secret desde 300k/s
+  private static RAINBOW_5M = 5_000_000 // 5M+: destacados y hook especial
+  private static COLOR_DEFAULT = 0x95a5a6
+  private static COLOR_RAINBOW = 0x2ecc71 // si hay ≥5M/s en el embed general
+  private static COLOR_5M_ONLY = 0x0b63ff // azul fuerte para hook 5M
+
+  // Límites Discord (automático: partimos en múltiples embeds/mensajes)
+  private static MAX_FIELDS_PER_EMBED = 25
+  private static MAX_EMBEDS_PER_MESSAGE = 10
+  private static MAX_FIELD_VALUE = 1024
+  private static MAX_EMBED_CHARS = 5500
 
   static getInstance() {
     if (!this.instance) this.instance = new PlotStream()
@@ -135,20 +143,17 @@ export class PlotStream {
   }
 
   /**
-   * Un SOLO embed por ingest, mismo payload para MAIN y CARLOS:
-   * - Secret: siempre (cualquier cantidad)
-   * - No-secret: ≥ 1M/s
-   * - ≥ 5M/s: sección RAINBOW (arriba) con nombre en verde
-   * - No-secret se agrupan por rarity (ej. Brainrot God)
+   * - Hook CARLOS (DISCORD_WEBHOOK_CARLOS): Secretos (siempre) + no-secret ≥ 300k/s
+   * - Hook TEST   (DISCORD_WEBHOOK_TEST):   igual que CARLOS (para validar)
+   * - Hook 5M     (DISCORD_WEBHOOK_5M):     SOLO ≥ 5M/s (azul fuerte + letras blancas con ANSI)
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
-    const hookMain = env.get('DISCORD_WEBHOOK')
     const hookCarlos = env.get('DISCORD_WEBHOOK_CARLOS')
-    const targets = [hookMain, hookCarlos].filter(Boolean) as string[]
-    if (!targets.length) return
+    const hookTest = env.get('DISCORD_WEBHOOK_TEST')
+    const hook5m = env.get('DISCORD_WEBHOOK_5M')
 
     type Item = { name: string; p: number; plot: string; rarity?: string }
-    const items: Item[] = []
+    const all: Item[] = []
 
     for (const plot of plots) {
       for (const ap of plot.animalPodiums) {
@@ -157,99 +162,290 @@ export class PlotStream {
         const a = ap as AnimalFull
         const p = a.generation?.perSecond
         if (typeof p !== 'number') continue
-        if (a.rarity === 'Secret' || p >= PlotStream.MIN_NON_SECRET) {
-          items.push({ name: a.displayName, p, plot: plot.plotSign, rarity: a.rarity })
-        }
+        all.push({ name: a.displayName, p, plot: plot.plotSign, rarity: a.rarity })
       }
     }
-    if (!items.length) return
+    if (!all.length) return
 
-    items.sort((a, b) => b.p - a.p)
-
-    const rainbow = items.filter((i) => i.p >= PlotStream.RAINBOW_5M)
-    const secrets = items.filter((i) => i.rarity === 'Secret')
-    const normals = items.filter(
-      (i) =>
-        i.rarity !== 'Secret' && i.p >= PlotStream.MIN_NON_SECRET && i.p < PlotStream.RAINBOW_5M
+    // === Conjuntos ===
+    const eligible300k = all.filter(
+      (i) => i.rarity === 'Secret' || i.p >= PlotStream.MIN_NON_SECRET
     )
+    const only5m = all.filter((i) => i.p >= PlotStream.RAINBOW_5M)
 
-    // Helper para limitar
-    const cap = <T>(arr: T[]) => {
-      const max = PlotStream.MAX_PER_SECTION
-      return { head: arr.slice(0, max), overflow: Math.max(arr.length - max, 0) }
+    // === CARLOS / TEST (≥300k + secretos) ===
+    if (eligible300k.length) {
+      const embeds = this.buildEmbedsPretty(jobId, eligible300k, { strongBlueHeaderIfHas5m: true })
+      await this.postInChunks([hookCarlos, hookTest].filter(Boolean) as string[], embeds)
     }
 
-    const fields: any[] = []
-
-    // RAINBOW primero
-    if (rainbow.length) {
-      const { head, overflow } = cap(rainbow)
-      const valueParts = head.map((i) => {
-        const green = `\u001b[0;32m${i.name}\u001b[0m`
-        return `\`\`\`ansi\n${green}\n\`\`\`\n${this.human(i.p)}/s — ${i.plot}`
+    // === 5M ONLY (azul fuerte + ANSI fondo azul/blanco) ===
+    if (only5m.length && hook5m) {
+      const embeds5m = this.buildEmbedsPretty(jobId, only5m, {
+        forceBlue: true,
+        titleSuffix: ' • 5M+ ONLY',
+        fiveMAnsiBanner: true,
       })
-      if (overflow) valueParts.push(`… y **${overflow}** más`)
-      fields.push({ name: 'RAINBOW (≥5M/s)', value: valueParts.join('\n\n'), inline: false })
+      await this.postInChunks([hook5m], embeds5m)
     }
+  }
 
-    // Secretos
-    if (secrets.length) {
-      const { head, overflow } = cap(secrets)
-      const valueParts = head.map(
-        (i) => `• **${i.name} (Secret)** — ${this.human(i.p)}/s — ${i.plot}`
+  // ===================== RENDER “BONITO” =====================
+  private buildEmbedsPretty(
+    jobId: string,
+    itemsRaw: Array<{ name: string; p: number; plot: string; rarity?: string }>,
+    opts?: {
+      titleSuffix?: string
+      strongBlueHeaderIfHas5m?: boolean
+      forceBlue?: boolean
+      fiveMAnsiBanner?: boolean
+    }
+  ) {
+    let items = [...itemsRaw].sort((a, b) => b.p - a.p)
+    const has5m = items.some((i) => i.p >= PlotStream.RAINBOW_5M)
+
+    // Resumen por rareza (Secretos primero)
+    const counts = new Map<string, number>()
+    for (const it of items) {
+      const key = it.rarity === 'Secret' ? 'Secretos' : (it.rarity ?? 'Otros')
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    const summaryParts: string[] = []
+    if (counts.has('Secretos')) summaryParts.push(`Secretos ${counts.get('Secretos')}`)
+    const rest = [...counts.entries()]
+      .filter(([k]) => k !== 'Secretos')
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    for (const [k, v] of rest) summaryParts.push(`${k} ${v}`)
+
+    // Top banner 5M+ (si procede) — separamos para no duplicar en grupos
+    const top5m = items.filter((i) => i.p >= PlotStream.RAINBOW_5M)
+    const below5m = items.filter((i) => i.p < PlotStream.RAINBOW_5M)
+
+    // Agrupar por plot el resto
+    type Group = {
+      secrets: Array<{ name: string; p: number }>
+      normalsByRarity: Map<string, Array<{ name: string; p: number }>>
+    }
+    const byPlot = new Map<string, Group>()
+    const pushGroup = (plot: string, rarity: string | undefined, name: string, p: number) => {
+      const g = byPlot.get(plot) ?? { secrets: [], normalsByRarity: new Map() }
+      if (rarity === 'Secret') {
+        // @ts-ignore
+        g.secrets.push({ name, p })
+      } else {
+        const r = rarity && rarity.trim() ? rarity : 'Otros'
+        const arr = g.normalsByRarity.get(r) ?? []
+        arr.push({ name, p })
+        g.normalsByRarity.set(r, arr)
+      }
+      byPlot.set(plot, g)
+    }
+    for (const it of below5m) pushGroup(it.plot, it.rarity, it.name, it.p)
+    // (Si quieres ver también 5M dentro del plot, comenta la siguiente línea y deja que entren con pushGroup)
+    // for (const it of top5m) pushGroup(it.plot, it.rarity, it.name, it.p)
+
+    // Orden plots por mejor p/s
+    const orderedPlots = [...byPlot.entries()].sort((a, b) => {
+      const bestA = Math.max(
+        0,
+        ...a[1].secrets.map((x) => x.p),
+        ...[...a[1].normalsByRarity.values()].flat().map((x) => x.p)
       )
-      if (overflow) valueParts.push(`… y **${overflow}** más`)
-      fields.push({ name: 'SECRETO(S)', value: valueParts.join('\n'), inline: false })
+      const bestB = Math.max(
+        0,
+        ...b[1].secrets.map((x) => x.p),
+        ...[...b[1].normalsByRarity.values()].flat().map((x) => x.p)
+      )
+      return bestB - bestA
+    })
+
+    // ==== Construimos fields ====
+    const fields: Array<{ name: string; value: string; inline?: boolean }> = []
+
+    // 5M banner (ANSI fondo azul / letra blanca)
+    if (top5m.length) {
+      const lines = top5m.map((i) =>
+        this.ansiBlueWhite(` ${i.name} — ${this.human(i.p)}/s — ${i.plot} `)
+      )
+      const block = this.wrapAnsi(lines.join('\n'))
+      fields.push({ name: '⚡ 5M+ DESTACADOS', value: block, inline: false })
     }
 
-    // No-secret agrupados por rarity
-    if (normals.length) {
-      const byRarity = normals.reduce<Record<string, Item[]>>((acc, it) => {
-        const key = it.rarity && it.rarity.trim() ? it.rarity : 'Otros'
-        ;(acc[key] ||= []).push(it)
-        return acc
-      }, {})
+    // Por plot
+    for (const [plotName, group] of orderedPlots) {
+      const lines: string[] = []
 
-      // Ordena grupos por su mejor p/s desc para que lo top salga arriba
-      const ordered = Object.entries(byRarity).sort((a, b) => {
+      // Secretos (blanco remarcado, ANSI bright white + bold)
+      if (group.secrets.length) {
+        const sec = [...group.secrets].sort((a, b) => b.p - a.p)
+        const sLines = sec.map((it) => this.ansiWhiteBold(` ¬ ${it.name} — ${this.human(it.p)}/s `))
+        lines.push('**Secretos**')
+        lines.push(this.wrapAnsi(sLines.join('\n')))
+      }
+
+      // Rarities no-secret
+      const orderedRarities = [...group.normalsByRarity.entries()].sort((a, b) => {
         const maxA = Math.max(...a[1].map((x) => x.p))
         const maxB = Math.max(...b[1].map((x) => x.p))
         return maxB - maxA
       })
 
-      for (const [rarity, list] of ordered) {
-        list.sort((a, b) => b.p - a.p)
-        const { head, overflow } = cap(list)
-        const valueParts = head.map((i) => `• ${i.name} — ${this.human(i.p)}/s — ${i.plot}`)
-        if (overflow) valueParts.push(`… y **${overflow}** más`)
-        fields.push({ name: rarity, value: valueParts.join('\n'), inline: false })
+      for (const [rarity, arr] of orderedRarities) {
+        const arrSorted = [...arr].sort((a, b) => b.p - a.p)
+        if (rarity === 'Brainrot God') {
+          // varios colores (cíclico)
+          const palette = [31, 32, 33, 34, 35, 36, 91, 92, 93, 94, 95, 96] // ANSI fg
+          const colored = arrSorted.map((it, idx) =>
+            this.ansiFg(` ¬ ${it.name} — ${this.human(it.p)}/s `, palette[idx % palette.length])
+          )
+          lines.push('**Brainrot God**')
+          lines.push(this.wrapAnsi(colored.join('\n')))
+        } else {
+          // amarillo para otras rarities
+          const yLines = arrSorted.map((it) =>
+            this.ansiYellow(` ¬ ${it.name} — ${this.human(it.p)}/s `)
+          )
+          lines.push(`**${rarity}**`)
+          lines.push(this.wrapAnsi(yLines.join('\n')))
+        }
+      }
+
+      const value = lines.filter(Boolean).join('\n')
+      if (value.trim().length) {
+        fields.push({ name: `• ${plotName}`, value, inline: false })
       }
     }
 
-    // JobId
-    fields.push({ name: 'Job ID', value: `\`\`\`${jobId}\`\`\`` })
+    // Footer con JobId
+    fields.push({ name: 'Job ID', value: `\`\`\`${jobId}\`\`\``, inline: false })
 
-    const embed = {
-      title: 'PetNotify',
-      color: rainbow.length ? 0x2ecc71 : 0x95a5a6,
-      description: [
-        secrets.length ? `**Secretos:** ${secrets.length}` : null,
-        `**Total:** ${items.length}`,
-      ]
-        .filter(Boolean)
-        .join(' • '),
-      fields,
-      footer: { text: `SauPetNotify • ${new Date().toLocaleString()}` },
+    // ==== Empaquetar en 1..N embeds y 1..M mensajes (si excede límites) ====
+    const baseTitle = `PetNotify${opts?.titleSuffix ?? ''}`
+    const color = opts?.forceBlue
+      ? PlotStream.COLOR_5M_ONLY
+      : opts?.strongBlueHeaderIfHas5m && has5m
+        ? PlotStream.COLOR_RAINBOW
+        : PlotStream.COLOR_DEFAULT
+
+    const description = [
+      `**TOTAL:** ${items.length}`,
+      counts.size ? [...summaryPartsToBars(counts)].join(' | ') : null,
+    ]
+      .filter(Boolean)
+      .join('\n')
+
+    function* summaryPartsToBars(map: Map<string, number>) {
+      const parts: string[] = []
+      if (map.has('Secretos')) parts.push(`Secretos ${map.get('Secretos')}`)
+      for (const [k, v] of [...map.entries()]
+        .filter(([k]) => k !== 'Secretos')
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
+        parts.push(`${k} ${v}`)
+      }
+      yield* parts
     }
 
-    const payload = { embeds: [embed] }
-    await Promise.all(targets.map((url) => this.safePost(url, payload)))
+    return this.packEmbeds(baseTitle, description, color, fields)
+  }
+
+  // ---- Helpers de empaquetado (split por límites Discord) ----
+  private packEmbeds(
+    title: string,
+    description: string,
+    color: number,
+    fields: Array<{ name: string; value: string; inline?: boolean }>
+  ) {
+    const embeds: any[] = []
+    let current = this.newEmbed(title, description, color)
+    let fieldCount = 0
+    let chars = this.embedSize(current)
+
+    for (const f of fields) {
+      const chunks = this.chunkFieldValue(f.value, PlotStream.MAX_FIELD_VALUE)
+      for (const [i, chunk] of chunks.entries()) {
+        const name = i === 0 ? f.name : `${f.name} (cont.)`
+        const field = { name, value: chunk, inline: false }
+        const addSize = name.length + chunk.length + 10
+
+        const wouldOverflow =
+          fieldCount >= PlotStream.MAX_FIELDS_PER_EMBED ||
+          chars + addSize > PlotStream.MAX_EMBED_CHARS
+        if (wouldOverflow) {
+          embeds.push(current)
+          current = this.newEmbed(title + ` (cont.)`, description, color)
+          fieldCount = 0
+          chars = this.embedSize(current)
+        }
+        current.fields.push(field)
+        fieldCount++
+        chars += addSize
+      }
+    }
+    if (current.fields.length) embeds.push(current)
+    return embeds
+  }
+
+  private newEmbed(title: string, description: string, color: number) {
+    return {
+      title,
+      color,
+      description,
+      fields: [] as any[],
+      footer: { text: `SauPetNotify • ${new Date().toLocaleString()}` },
+    }
+  }
+
+  private embedSize(e: any) {
+    const fieldsLen = e.fields.reduce((a: number, f: any) => a + f.name.length + f.value.length, 0)
+    return (e.title?.length ?? 0) + (e.description?.length ?? 0) + fieldsLen + 50
+  }
+
+  private chunkFieldValue(s: string, max: number) {
+    if (s.length <= max) return [s]
+    const out: string[] = []
+    let i = 0
+    while (i < s.length) {
+      out.push(s.slice(i, i + max))
+      i += max
+    }
+    return out
+  }
+
+  private async postInChunks(urls: string[], embeds: any[]) {
+    if (!urls.length || !embeds.length) return
+    // Discord: máx 10 embeds por mensaje → fragmentamos
+    for (const url of urls) {
+      let i = 0
+      while (i < embeds.length) {
+        const slice = embeds.slice(i, i + PlotStream.MAX_EMBEDS_PER_MESSAGE)
+        await this.safePost(url, { embeds: slice })
+        i += PlotStream.MAX_EMBEDS_PER_MESSAGE
+      }
+    }
   }
 
   private async safePost(url: string, payload: any) {
     try {
       await axios.post(url, payload)
     } catch {}
+  }
+
+  // ---- Estilo ANSI ----
+  private wrapAnsi(s: string) {
+    return '```ansi\n' + s + '\n```'
+  }
+  private ansiWhiteBold(s: string) {
+    return '\u001b[1;97m' + s + '\u001b[0m'
+  }
+  private ansiYellow(s: string) {
+    return '\u001b[33m' + s + '\u001b[0m'
+  }
+  private ansiFg(s: string, code: number) {
+    return `\u001b[${code}m${s}\u001b[0m`
+  }
+  private ansiBlueWhite(s: string) {
+    // Fondo azul fuerte + texto blanco bold
+    return '\u001b[44m\u001b[1;97m' + s + '\u001b[0m'
   }
 
   private human(n: number): string {
