@@ -42,7 +42,7 @@ export class PlotStream {
 
   // ====== UMBRALES Y COLORES ======
   private static MIN_NON_SECRET = 300_000 // Carlos: >=300k
-  private static TEST_MIN = 5_000_000 // Test:   >=500k (no-secret)
+  private static TEST_MIN = 500_000 // Test:   >=500k (no-secret)
   private static RAINBOW_5M = 5_000_000 // 5M+
   private static COLOR_DEFAULT = 0x95a5a6
   private static COLOR_HAS_5M = 0x2ecc71 // verde si hay 5M en ese embed
