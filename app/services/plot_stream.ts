@@ -156,8 +156,8 @@ export class PlotStream {
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
     const hookCarlos = env.get('DISCORD_WEBHOOK_CARLOS')
-    const hookTest = env.get('DISCORD_WEBHOOK_TEST')
-    const hook5m = env.get('DISCORD_WEBHOOK_5M')
+    const hookTest   = env.get('DISCORD_WEBHOOK_TEST')
+    const hook5m     = env.get('DISCORD_WEBHOOK_5M')
 
     if (!hookCarlos && !hookTest && !hook5m) {
       console.warn('[PlotStream] No Discord webhooks configured; skipping post.')
@@ -194,47 +194,37 @@ export class PlotStream {
 
     const has5m = all.some((i) => i.p >= PlotStream.RAINBOW_5M)
 
-    // Helper: post a Carlos-embed con tinte si hay 5M
-    const postCarlos = async () => {
-      if (!hookCarlos) return
+    // +5M (solo ≥5M) — si aplica
+    if (has5m && hook5m) {
+      const only5m = all.filter((i) => i.p >= PlotStream.RAINBOW_5M)
+      const embeds5m = this.buildEmbedsMarkdown(jobId, only5m, {
+        forceEmbedColorBlue: true,
+        scopeBadge: '+5M',
+      })
+      await this.postInChunks([hook5m], embeds5m)
+    }
+
+    // Carlos: Secret o ≥300k
+    if (hookCarlos) {
       const eligibleCarlos = all.filter(
         (i) => i.rarity === 'Secret' || i.p >= PlotStream.MIN_NON_SECRET
       )
-      if (!eligibleCarlos.length) return
-      const embedsCarlos = this.buildEmbedsMarkdown(jobId, eligibleCarlos, {
-        tintHas5m: has5m, // pinta verde si hay 5M en el job
-      })
-      await this.postInChunks([hookCarlos], embedsCarlos)
-    }
-
-    if (has5m) {
-      // +5M (solo ≥5M)
-      if (hook5m) {
-        const only5m = all.filter((i) => i.p >= PlotStream.RAINBOW_5M)
-        const embeds5m = this.buildEmbedsMarkdown(jobId, only5m, {
-          forceEmbedColorBlue: true,
-          scopeBadge: '+5M',
+      if (eligibleCarlos.length) {
+        const embedsCarlos = this.buildEmbedsMarkdown(jobId, eligibleCarlos, {
+          tintHas5m: has5m, // pinta verde si hubo 5M en el job
         })
-        await this.postInChunks([hook5m], embeds5m)
+        await this.postInChunks([hookCarlos], embedsCarlos)
       }
-
-      // También Carlos cuando hay 5M
-      await postCarlos()
-
-      // No Test cuando hay 5M
-      return
     }
 
-    // No hay 5M → Carlos + Test
-    await postCarlos()
-
+    // Test: SIEMPRE Secret o ≥300k (incluye ≥5M también)
     if (hookTest) {
       const eligibleTest = all.filter(
-        (i) => (i.rarity === 'Secret' || i.p >= PlotStream.TEST_MIN) && i.p < PlotStream.RAINBOW_5M
+        (i) => i.rarity === 'Secret' || i.p >= PlotStream.MIN_NON_SECRET
       )
       if (eligibleTest.length) {
         const embedsTest = this.buildEmbedsMarkdown(jobId, eligibleTest, {
-          tintHas5m: false,
+          // sin cambios de color especiales para Test
         })
         await this.postInChunks([hookTest], embedsTest)
       }
