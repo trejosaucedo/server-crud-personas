@@ -397,7 +397,13 @@ export class PlotStream {
       color,
       description,
       fields: [] as any[],
-      footer: { text: `SauPetNotify • ${new Date().toLocaleString()}` },
+      footer: {
+        text: `SauPetNotify • ${new Intl.DateTimeFormat('es-MX', {
+          dateStyle: 'short',
+          timeStyle: 'medium',
+          timeZone: 'America/Monterrey',
+        }).format(new Date())} America/Monterrey`,
+      },
     }
   }
 
