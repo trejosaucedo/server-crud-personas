@@ -41,8 +41,7 @@ export class PlotStream {
   private ttlMs = 60_000
 
   // ====== UMBRALES Y COLORES ======
-  private static MIN_NON_SECRET = 300_000 // Carlos: >=300k
-  private static TEST_MIN = 500_000 // Test:   >=500k (no-secret)
+  private static MIN_NON_SECRET = 800_000 // Carlos: >=300k// Test:   >=500k (no-secret)
   private static RAINBOW_5M = 5_000_000 // 5M+
   private static COLOR_DEFAULT = 0x95a5a6
   private static COLOR_HAS_5M = 0x2ecc71 // verde si hay 5M en ese embed
@@ -156,8 +155,8 @@ export class PlotStream {
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
     const hookCarlos = env.get('DISCORD_WEBHOOK_CARLOS')
-    const hookTest   = env.get('DISCORD_WEBHOOK_TEST')
-    const hook5m     = env.get('DISCORD_WEBHOOK_5M')
+    const hookTest = env.get('DISCORD_WEBHOOK_TEST')
+    const hook5m = env.get('DISCORD_WEBHOOK_5M')
 
     if (!hookCarlos && !hookTest && !hook5m) {
       console.warn('[PlotStream] No Discord webhooks configured; skipping post.')
