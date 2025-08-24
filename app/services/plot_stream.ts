@@ -41,7 +41,7 @@ export class PlotStream {
   private ttlMs = 60_000
 
   // ====== UMBRALES Y COLORES ======
-  private static MIN_NON_SECRET = 1_000_000 // Carlos: >=300k// Test:   >=500k (no-secret)
+  private static MIN_NON_SECRET = 500_000 // Carlos: >=300k// Test:   >=500k (no-secret)
   private static RAINBOW_5M = 1_000_000 // 5M+
   private static COLOR_DEFAULT = 0x95a5a6
   private static COLOR_HAS_5M = 0x2ecc71
