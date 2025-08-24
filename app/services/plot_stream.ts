@@ -199,7 +199,7 @@ export class PlotStream {
       const only5m = all.filter((i) => i.p >= PlotStream.RAINBOW_5M)
       const embeds5m = this.buildEmbedsMarkdown(jobId, only5m, {
         forceEmbedColorBlue: true,
-        scopeBadge: '+5M',
+        scopeBadge: ':D',
       })
       await this.postInChunks([hook5m], embeds5m)
     }
@@ -217,7 +217,6 @@ export class PlotStream {
       }
     }
 
-    // Test: SIEMPRE Secret o ≥300k (incluye ≥5M también)
     if (hookTest) {
       const eligibleTest = all.filter(
         (i) =>
