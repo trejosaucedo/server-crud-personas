@@ -81,7 +81,7 @@ export class PlotStream {
   }
 
   private static FINDER66_PARAMS: ChannelParams = {
-    minSecret: 1_000_000,
+    minSecret: 300_000,
     maxSecret: PlotStream.MAX_TEST,
     minNonSecret: PlotStream.MIN_NON_SECRET,
     maxNonSecret: PlotStream.MAX_TEST,
