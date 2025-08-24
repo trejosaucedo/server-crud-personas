@@ -22,7 +22,7 @@ export default await Env.create(new URL('../', import.meta.url), {
   DB_USER: Env.schema.string(),
   DB_PASSWORD: Env.schema.string.optional(),
   DB_DATABASE: Env.schema.string(),
+  DISCORD_WEBHOOK_PUBLIC: Env.schema.string.optional({ format: 'url' }),
   DISCORD_WEBHOOK_5M: Env.schema.string.optional({ format: 'url' }),
-  DISCORD_WEBHOOK_CARLOS: Env.schema.string.optional({ format: 'url' }),
-  DISCORD_WEBHOOK_TEST: Env.schema.string.optional({ format: 'url' }),
+  DISCORD_WEBHOOK_FINDER66: Env.schema.string.optional({ format: 'url' }),
 })

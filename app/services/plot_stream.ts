@@ -35,24 +35,57 @@ type FilterQuery = {
   minPerSecond?: number
 }
 
+// ============== PARAMS POR CANAL (sin colores) ==============
+type ChannelParams = {
+  minSecret?: number
+  maxSecret?: number
+  minNonSecret?: number
+  maxNonSecret?: number
+}
+
+type ChannelConfig = ChannelParams & {
+  name: string
+  webhook: string | null
+  badge?: string
+}
+
 export class PlotStream {
   private static instance: PlotStream
   private buffer: { at: number; jobId: string; generatedAt: string; plots: Plot[] }[] = []
   private ttlMs = 60_000
 
-  // ====== UMBRALES Y COLORES ======
-  private static MIN_NON_SECRET = 500_000 // Carlos: >=300k// Test:   >=500k (no-secret)
-  private static RAINBOW_5M = 1_000_000 // 5M+
-  private static COLOR_DEFAULT = 0x95a5a6
-  private static COLOR_HAS_5M = 0x2ecc71
-  private static COLOR_5M_ONLY = 0x0b63ff
-  private static MAX_TEST = 3_000_000
+  // ====== UMBRALES BASE ======
+  private static MIN_NON_SECRET = 500_000
+  private static RAINBOW_5M = 5_000_000
+  private static MAX_TEST = 5_000_000
 
   // Límites Discord
   private static MAX_FIELDS_PER_EMBED = 25
   private static MAX_EMBEDS_PER_MESSAGE = 10
   private static MAX_FIELD_VALUE = 1024
   private static MAX_EMBED_CHARS = 5500
+
+  // ====== GRUPOS DE PARÁMETROS (sin colores) ======
+  private static PUBLIC_PARAMS: ChannelParams = {
+    minSecret: 0,
+    maxSecret: undefined,
+    minNonSecret: PlotStream.MIN_NON_SECRET,
+    maxNonSecret: undefined,
+  }
+
+  private static FIVE_M_PARAMS: ChannelParams = {
+    minSecret: PlotStream.RAINBOW_5M,
+    maxSecret: undefined,
+    minNonSecret: PlotStream.RAINBOW_5M,
+    maxNonSecret: undefined,
+  }
+
+  private static FINDER66_PARAMS: ChannelParams = {
+    minSecret: 1_000_000,
+    maxSecret: PlotStream.MAX_TEST,
+    minNonSecret: PlotStream.MIN_NON_SECRET,
+    maxNonSecret: PlotStream.MAX_TEST,
+  }
 
   static getInstance() {
     if (!this.instance) this.instance = new PlotStream()
@@ -144,22 +177,33 @@ export class PlotStream {
     return out
   }
 
+  // Evalúa si un item cumple los umbrales de un canal
+  private meetsChannelThresholds(
+    item: { p: number; rarity?: string },
+    cfg: ChannelParams
+  ): boolean {
+    const isSecret = item.rarity === 'Secret'
+    const min = isSecret ? cfg.minSecret : cfg.minNonSecret
+    const max = isSecret ? cfg.maxSecret : cfg.maxNonSecret
+
+    if (typeof min === 'number' && item.p < min) return false
+    if (typeof max === 'number' && item.p > max) return false
+    return true
+  }
+
   /**
-   * Enrutamiento:
-   * - Si hay ≥5M en el job:
-   *     • Enviar a +5M (solo los ≥5M)
-   *     • Enviar a Carlos (Secret o ≥300k) ← también cuando hay 5M
-   *     • NO enviar a Test
-   * - Si NO hay ≥5M:
-   *     • Carlos: Secret o ≥300k
-   *     • Test: (<5M) y (Secret o ≥500k)
+   * Enrutamiento independiente por canal (sin colores):
+   * - DISCORD_WEBHOOK_PUBLIC
+   * - DISCORD_WEBHOOK_5M
+   * - DISCORD_WEBHOOK_FINDER66
+   * Cada uno con su grupo de parámetros: PUBLIC_PARAMS, FIVE_M_PARAMS, FINDER66_PARAMS
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
-    const hookCarlos = env.get('DISCORD_WEBHOOK_CARLOS')
-    const hookTest = env.get('DISCORD_WEBHOOK_TEST')
-    const hook5m = env.get('DISCORD_WEBHOOK_5M')
+    const hookPublic = env.get('DISCORD_WEBHOOK_PUBLIC') || null
+    const hook5m = env.get('DISCORD_WEBHOOK_5M') || null
+    const hookFinder66 = env.get('DISCORD_WEBHOOK_FINDER66') || null
 
-    if (!hookCarlos && !hookTest && !hook5m) {
+    if (!hookPublic && !hook5m && !hookFinder66) {
       console.warn('[PlotStream] No Discord webhooks configured; skipping post.')
       return
     }
@@ -167,7 +211,7 @@ export class PlotStream {
     type Item = { name: string; p: number; plot: string; rarity?: string }
     const all: Item[] = []
 
-    // Tolerante a perSecond string
+    // Normalización tolerante de perSecond
     for (const plot of plots) {
       for (const ap of plot.animalPodiums) {
         const anyAp = ap as any
@@ -192,43 +236,37 @@ export class PlotStream {
       return
     }
 
-    const has5m = all.some((i) => i.p >= PlotStream.RAINBOW_5M)
+    // Canales con sus parámetros
+    const channels: ChannelConfig[] = [
+      {
+        name: 'Public',
+        webhook: hookPublic,
+        badge: 'Public',
+        ...PlotStream.PUBLIC_PARAMS,
+      },
+      {
+        name: '+5M',
+        webhook: hook5m,
+        badge: '+5M',
+        ...PlotStream.FIVE_M_PARAMS,
+      },
+      {
+        name: 'Finder66',
+        webhook: hookFinder66,
+        badge: 'Finder66',
+        ...PlotStream.FINDER66_PARAMS,
+      },
+    ]
 
-    // +5M (solo ≥5M) — si aplica
-    if (has5m && hook5m) {
-      const only5m = all.filter((i) => i.p >= PlotStream.RAINBOW_5M)
-      const embeds5m = this.buildEmbedsMarkdown(jobId, only5m, {
-        forceEmbedColorBlue: true,
-        scopeBadge: ':D',
+    for (const ch of channels) {
+      if (!ch.webhook) continue
+      const eligible = all.filter((it) => this.meetsChannelThresholds(it, ch))
+      if (!eligible.length) continue
+
+      const embeds = this.buildEmbedsMarkdown(jobId, eligible, {
+        scopeBadge: ch.badge,
       })
-      await this.postInChunks([hook5m], embeds5m)
-    }
-
-    // Carlos: Secret o ≥300k
-    if (hookCarlos) {
-      const eligibleCarlos = all.filter(
-        (i) => i.rarity === 'Secret' || i.p >= PlotStream.MIN_NON_SECRET
-      )
-      if (eligibleCarlos.length) {
-        const embedsCarlos = this.buildEmbedsMarkdown(jobId, eligibleCarlos, {
-          tintHas5m: has5m, // pinta verde si hubo 5M en el job
-        })
-        await this.postInChunks([hookCarlos], embedsCarlos)
-      }
-    }
-
-    if (hookTest) {
-      const eligibleTest = all.filter(
-        (i) =>
-          (i.rarity === 'Secret' || i.p >= PlotStream.MIN_NON_SECRET) &&
-          i.p <= PlotStream.MAX_TEST
-      )
-      if (eligibleTest.length) {
-        const embedsTest = this.buildEmbedsMarkdown(jobId, eligibleTest, {
-          // sin cambios de color especiales para Test
-        })
-        await this.postInChunks([hookTest], embedsTest)
-      }
+      await this.postInChunks([ch.webhook], embeds)
     }
   }
 
@@ -237,13 +275,10 @@ export class PlotStream {
     jobId: string,
     itemsRaw: Array<{ name: string; p: number; plot: string; rarity?: string }>,
     opts?: {
-      tintHas5m?: boolean
-      forceEmbedColorBlue?: boolean
-      scopeBadge?: string // p.ej. "+5M"
+      scopeBadge?: string // p.ej. "Public", "+5M", "Finder66"
     }
   ) {
     const items = [...itemsRaw].sort((a, b) => b.p - a.p)
-    const has5m = items.some((i) => i.p >= PlotStream.RAINBOW_5M)
 
     // Resumen por rareza
     const counts = new Map<string, number>()
@@ -279,7 +314,7 @@ export class PlotStream {
       return bestB - bestA
     })
 
-    // ===== TOP: JOB ID + triángulos planos (con salto después) + Mejor + totales =====
+    // ===== TOP: JOB ID + triángulos + Mejor + totales =====
     const best = items[0]
     const TRIANGLES = '△▽△▽△▽△▽△▽△▽△▽△▽ △▽△▽△▽△▽△▽△▽△▽△▽'
 
@@ -287,22 +322,22 @@ export class PlotStream {
       '**JOB ID**',
       '```' + jobId + '```',
       TRIANGLES,
-      '', // ← línea en blanco DESPUÉS de los triángulos
+      '',
       best
         ? `**Mejor:** ${best.name} — **${this.human(best.p)}/s** — ${best.rarity ?? 'Otros'}`
         : null,
       `**TOTAL:** ${items.length}`,
       barParts.length ? barParts.join(' | ') : null,
-    ].filter(Boolean)
+    ].filter(Boolean) as string[]
 
     const descriptionJoined = descriptionParts.join('\n')
     const description =
       descriptionJoined.length > 1024 ? descriptionJoined.slice(0, 1021) + '…' : descriptionJoined
 
-    // ===== Helpers (sin ANSI) =====
+    // Helpers
     const rarityHeader = (rarity: string) => `**${rarity.trim()}**`
 
-    // ===== Fields =====
+    // Fields
     const fields: Array<{ name: string; value: string; inline?: boolean }> = []
 
     for (const [plotName, group] of orderedPlots) {
@@ -334,26 +369,18 @@ export class PlotStream {
       })
     }
 
-    // ===== Meta del embed =====
     const title = opts?.scopeBadge ? `SauNotify • ${opts.scopeBadge}` : 'SauNotify'
-    const color = opts?.forceEmbedColorBlue
-      ? PlotStream.COLOR_5M_ONLY
-      : opts?.tintHas5m && has5m
-        ? PlotStream.COLOR_HAS_5M
-        : PlotStream.COLOR_DEFAULT
-
-    return this.packEmbeds(title, description, color, fields)
+    return this.packEmbeds(title, description, fields)
   }
 
   // ---- Empaquetado por límites de Discord ----
   private packEmbeds(
     title: string,
     description: string,
-    color: number,
     fields: Array<{ name: string; value: string; inline?: boolean }>
   ) {
     const embeds: any[] = []
-    let current = this.newEmbed(title, description, color)
+    let current = this.newEmbed(title, description)
     let fieldCount = 0
     let chars = this.embedSize(current)
 
@@ -369,7 +396,7 @@ export class PlotStream {
           chars + addSize > PlotStream.MAX_EMBED_CHARS
         if (wouldOverflow) {
           if (current.fields.length) embeds.push(current)
-          current = this.newEmbed(title + ` (cont.)`, description, color)
+          current = this.newEmbed(title + ` (cont.)`, description)
           fieldCount = 0
           chars = this.embedSize(current)
         }
@@ -382,10 +409,9 @@ export class PlotStream {
     return embeds
   }
 
-  private newEmbed(title: string, description: string, color: number) {
+  private newEmbed(title: string, description: string) {
     return {
       title,
-      color,
       description,
       fields: [] as any[],
       footer: {
