@@ -41,11 +41,11 @@ export class PlotStream {
   private ttlMs = 60_000
 
   // ====== UMBRALES Y COLORES ======
-  private static MIN_NON_SECRET = 800_000 // Carlos: >=300k// Test:   >=500k (no-secret)
-  private static RAINBOW_5M = 5_000_000 // 5M+
+  private static MIN_NON_SECRET = 1_000_000 // Carlos: >=300k// Test:   >=500k (no-secret)
+  private static RAINBOW_5M = 1_000_000 // 5M+
   private static COLOR_DEFAULT = 0x95a5a6
-  private static COLOR_HAS_5M = 0x2ecc71 // verde si hay 5M en ese embed
-  private static COLOR_5M_ONLY = 0x0b63ff // azul para el hook +5
+  private static COLOR_HAS_5M = 0x2ecc71
+  private static COLOR_5M_ONLY = 0x0b63ff
   private static MAX_TEST = 3_000_000
 
   // Límites Discord
