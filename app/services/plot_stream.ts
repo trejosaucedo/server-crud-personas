@@ -46,6 +46,7 @@ export class PlotStream {
   private static COLOR_DEFAULT = 0x95a5a6
   private static COLOR_HAS_5M = 0x2ecc71 // verde si hay 5M en ese embed
   private static COLOR_5M_ONLY = 0x0b63ff // azul para el hook +5
+  private static MAX_TEST = 3_000_000
 
   // Límites Discord
   private static MAX_FIELDS_PER_EMBED = 25
@@ -219,7 +220,9 @@ export class PlotStream {
     // Test: SIEMPRE Secret o ≥300k (incluye ≥5M también)
     if (hookTest) {
       const eligibleTest = all.filter(
-        (i) => i.rarity === 'Secret' || i.p >= PlotStream.MIN_NON_SECRET
+        (i) =>
+          (i.rarity === 'Secret' || i.p >= PlotStream.MIN_NON_SECRET) &&
+          i.p <= PlotStream.MAX_TEST
       )
       if (eligibleTest.length) {
         const embedsTest = this.buildEmbedsMarkdown(jobId, eligibleTest, {
