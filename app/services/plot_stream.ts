@@ -1,6 +1,7 @@
 // app/services/plot_stream.ts
 import axios from 'axios'
 import env from '#start/env'
+import Ws from 'App/Services/Ws' // <<<<<< NUEVO: servidor Socket.IO (Ws.io)
 
 type Generation = { raw: string; perSecond: number | null; ready: boolean }
 
@@ -70,6 +71,20 @@ export class PlotStream {
   private static MAX_EMBEDS_PER_MESSAGE = 10
   private static MAX_FIELD_VALUE = 1024
   private static MAX_EMBED_CHARS = 5500
+
+  // ====== SOCKETS (rooms) y umbrales WS ======
+  private static SOCKET_ROOMS = {
+    onlySecrets: 'only-secrets',
+    plus2m: '+2m',
+    plus5m: '+5m',
+    plus10m: '+10m',
+  } as const
+
+  private static SOCKET_THRESHOLDS = {
+    twoM: 2_000_000,
+    fiveM: 5_000_000,
+    tenM: 10_000_000,
+  } as const
 
   // ====== GRUPOS DE PARÁMETROS (sin colores) ======
   private static PUBLIC_PARAMS: ChannelParams = {
@@ -222,7 +237,7 @@ export class PlotStream {
     return out
   }
 
-  // ====== Thresholds ======
+  // ====== Thresholds (para Discord) ======
   private meetsChannelThresholds(
     item: { p: number; rarity?: string },
     cfg: ChannelParams
@@ -241,6 +256,7 @@ export class PlotStream {
    * - DISCORD_WEBHOOK_5M
    * - DISCORD_WEBHOOK_FINDER66
    * - WATCHLIST -> FIND_WEBHOOK (hardcode)
+   * Además: emite WS rooms según flags (+2m, +5m, +10m, only-secrets) enviando SOLO jobId.
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
     const hookPublic = env.get('DISCORD_WEBHOOK_PUBLIC') || null
@@ -250,6 +266,10 @@ export class PlotStream {
     if (!hookPublic && !hook5m && !hookFinder66 && this.watchMap.size === 0) {
       console.warn(
         '[PlotStream] No Discord webhooks configurados ni watchlist activa; skipping post.'
+      )
+      // Aunque no haya webhooks, igual emitimos sockets:
+      this.emitSocketNotifications(jobId, plots).catch((e) =>
+        console.error('[PlotStream] WS emit error (no hooks):', e?.message || e)
       )
       return
     }
@@ -303,6 +323,9 @@ export class PlotStream {
 
     // ---- Escaneo de watchlist: nombre + mutation (opcional) ----
     await this.scanAndEmitWatches(jobId, plots)
+
+    // ---- WS rooms (+2m, +5m, +10m, only-secrets) → solo jobId ----
+    await this.emitSocketNotifications(jobId, plots)
   }
 
   // ===================== RENDER (Markdown ligero) =====================
@@ -316,13 +339,12 @@ export class PlotStream {
     // Resumen por rareza
     const counts = new Map<string, number>()
     for (const it of items) {
-      const bucket = it.rarity === 'Secret' ? 'Secretos' : (it.rarity ?? 'Otros')
+      const bucket = it.rarity === 'Secret' ? 'Secretos' : it.rarity ?? 'Otros'
       counts.set(bucket, (counts.get(bucket) ?? 0) + 1)
     }
     const barParts: string[] = []
     if (counts.has('Secretos')) barParts.push(`Secretos ${counts.get('Secretos')}`)
     for (const [k, v] of [...counts.entries()]
-      // eslint-disable-next-line @typescript-eslint/no-shadow
       .filter(([k]) => k !== 'Secretos')
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
       barParts.push(`${k} ${v}`)
@@ -367,14 +389,11 @@ export class PlotStream {
     const description =
       descriptionJoined.length > 1024 ? descriptionJoined.slice(0, 1021) + '…' : descriptionJoined
 
-    // Helpers
     const rarityHeader = (rarity: string) => `**${rarity.trim()}**`
 
-    // Fields
     const fields: Array<{ name: string; value: string; inline?: boolean }> = []
 
     for (const [plotName, group] of orderedPlots) {
-      // ordenar rarezas por su mejor p
       const raritiesOrdered = [...group.byRarity.entries()].sort((a, b) => {
         const maxA = Math.max(...a[1].map((x) => x.p))
         const maxB = Math.max(...b[1].map((x) => x.p))
@@ -387,7 +406,6 @@ export class PlotStream {
           .map((it) => `• ${it.name} — **${this.human(it.p)}/s**`)
           .join('\n')
 
-        // primer bloque: header con nombre de la base; siguientes usan ZWSP para no repetir
         const fieldName = idx === 0 ? `__**${plotName}**__` : '\u200B'
         const value = `${rarityHeader(rarity)}${rows ? '\n' + rows : ''}`
 
@@ -406,7 +424,6 @@ export class PlotStream {
     return this.packEmbeds(title, description, fields)
   }
 
-  // ---- Empaquetado por límites de Discord ----
   private packEmbeds(
     title: string,
     description: string,
@@ -519,7 +536,6 @@ export class PlotStream {
   private async scanAndEmitWatches(jobId: string, plots: Plot[]) {
     if (this.watchMap.size === 0) return
 
-    // Reutilizamos el mismo formato de embed usando buildEmbedsMarkdown(jobId, items, { scopeBadge: 'Find' })
     type Item = { name: string; p: number; plot: string; rarity?: string }
     const items: Item[] = []
 
@@ -534,7 +550,6 @@ export class PlotStream {
         const nameLow = this.norm(name)
         const itemMut = this.normMut(a?.mutation) // '' si no trae mutation
 
-        // ¿coincide con alguna entrada de watchlist? (nombre substring + mutation exacta o '' = sin mutation)
         let matched = false
         for (const { term, mutation } of this.watchMap.values()) {
           if (!nameLow.includes(term)) continue
@@ -546,7 +561,6 @@ export class PlotStream {
         }
         if (!matched) continue
 
-        // p/s solo para ordenar/mostrar (si no hay, 0)
         let p: number | null = null
         const rawP = a?.generation?.perSecond
         if (typeof rawP === 'number' && Number.isFinite(rawP)) p = rawP
@@ -568,5 +582,68 @@ export class PlotStream {
 
     const embeds = this.buildEmbedsMarkdown(jobId, items, { scopeBadge: 'Find' })
     await this.postInChunks([PlotStream.FIND_WEBHOOK], embeds)
+  }
+
+  // ===================== SOCKETS: cálculo de flags y emisión =====================
+  private computeSocketFlags(plots: Plot[]) {
+    let hasSecret = false
+    let ge2m = false
+    let ge5m = false
+    let ge10m = false
+
+    for (const plot of plots) {
+      for (const ap of plot.animalPodiums) {
+        const anyAp = ap as any
+        if (anyAp?.empty) continue
+        const a = ap as any
+
+        // Secret
+        if (a?.rarity === 'Secret') hasSecret = true
+
+        // p/s
+        let p: number | null = null
+        const rawP = a?.generation?.perSecond
+        if (typeof rawP === 'number' && Number.isFinite(rawP)) {
+          p = rawP
+        } else if (typeof rawP === 'string') {
+          const cleaned = rawP.trim().replace(/\/s$/i, '').replace(/^\$/, '')
+          p = this.parseHumanMoney(cleaned)
+        }
+
+        if (p !== null) {
+          if (p >= PlotStream.SOCKET_THRESHOLDS.twoM) ge2m = true
+          if (p >= PlotStream.SOCKET_THRESHOLDS.fiveM) ge5m = true
+          if (p >= PlotStream.SOCKET_THRESHOLDS.tenM) ge10m = true
+        }
+
+        // early exit si ya están todos
+        if (hasSecret && ge2m && ge5m && ge10m) return { hasSecret, ge2m, ge5m, ge10m }
+      }
+    }
+    return { hasSecret, ge2m, ge5m, ge10m }
+  }
+
+  private async emitSocketNotifications(jobId: string, plots: Plot[]) {
+    try {
+      const flags = this.computeSocketFlags(plots)
+      const rooms = PlotStream.SOCKET_ROOMS
+      const io = Ws.io
+
+      // Emitimos SOLO el jobId (string) por evento 'jobId'
+      if (flags.hasSecret) {
+        io.to(rooms.onlySecrets).emit('jobId', jobId)
+      }
+      if (flags.ge2m) {
+        io.to(rooms.plus2m).emit('jobId', jobId)
+      }
+      if (flags.ge5m) {
+        io.to(rooms.plus5m).emit('jobId', jobId)
+      }
+      if (flags.ge10m) {
+        io.to(rooms.plus10m).emit('jobId', jobId)
+      }
+    } catch (e: any) {
+      console.error('[PlotStream] emitSocketNotifications error:', e?.message || e)
+    }
   }
 }
