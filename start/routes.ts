@@ -9,8 +9,7 @@ router.get('/servers', [PlotsController, 'servers'])
 router.get('/', async () => ({ ok: true, service: 'bot-brainrot', time: new Date().toISOString() }))
 router.get('/health', async () => ({ ok: true }))
 
-// === WATCHLIST: agregar (q + mutation opcional)
-// Nota: si no envías "mutation", se guarda como "sin mutation" (match SOLO ítems sin mutation).
+
 router.post('/plots/find', async ({ request, response }) => {
   const term = String(
     request.input('q') ?? request.input('term') ?? request.input('name') ?? ''
@@ -23,8 +22,6 @@ router.post('/plots/find', async ({ request, response }) => {
   return response.ok({ ok: true, added, watching: stream.getWatchList() })
 })
 
-// === WATCHLIST: remover (q + mutation opcional)
-// Si omites mutation aquí, quita la entrada “sin mutation” del término.
 router.delete('/plots/find', async ({ request, response }) => {
   const term = String(
     request.input('q') ?? request.input('term') ?? request.input('name') ?? ''
