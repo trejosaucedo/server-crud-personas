@@ -55,13 +55,14 @@ export class PlotStream {
   private ttlMs = 60_000
 
   private watchMap = new Map<string, { term: string; mutation: string }>()
-  private static readonly AEX_HOOK =
-    'https://discord.com/api/webhooks/1407888137669312552/RGgCno4t0JwLn0sHUc2FbG089D0yZdrxjdTVHPAh2fGacIqILMByO0UipRiCv-zPoLuK'
 
   // ====== UMBRALES BASE ======
   private static MIN_NON_SECRET = 500_000
   private static RAINBOW_5M = 5_000_000
   private static MAX_TEST = 5_000_000
+
+  // Constantes para join
+  private static readonly PLACE_ID = 109983668079237
 
   // Límites Discord
   private static MAX_FIELDS_PER_EMBED = 25
@@ -91,14 +92,6 @@ export class PlotStream {
     maxNonSecret: PlotStream.MAX_TEST,
   }
 
-  // Solo Secret >= 550k (max ilimitado). Para excluir no-secret, maxNonSecret: 0
-  private static AEX_PARAMS: ChannelParams = {
-    minSecret: 550_000,
-    maxSecret: undefined,
-    minNonSecret: undefined,
-    maxNonSecret: 0,
-  }
-
   // ====== Singleton ======
   static getInstance() {
     if (!this.instance) this.instance = new PlotStream()
@@ -113,7 +106,7 @@ export class PlotStream {
   }
   private normMut(s: any) {
     return this.norm(s)
-  } // '' = sin mutation
+  }
   private watchKey(term: string, mutation: string) {
     return `${term}|${mutation}`
   }
@@ -246,15 +239,13 @@ export class PlotStream {
    * - DISCORD_WEBHOOK_PUBLIC
    * - DISCORD_WEBHOOK_5M
    * - DISCORD_WEBHOOK_FINDER66
-   * - AEX_HOOK (hardcode) → solo Secret >= 550k
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
     const hookPublic = env.get('DISCORD_WEBHOOK_PUBLIC') || null
     const hook5m = env.get('DISCORD_WEBHOOK_5M') || null
     const hookFinder66 = env.get('DISCORD_WEBHOOK_FINDER66') || null
-    const hookAex = PlotStream.AEX_HOOK
 
-    if (!hookPublic && !hook5m && !hookFinder66 && !hookAex) {
+    if (!hookPublic && !hook5m && !hookFinder66) {
       console.warn('[PlotStream] No Discord webhooks configurados; skipping post.')
       return
     }
@@ -281,10 +272,9 @@ export class PlotStream {
       }
     }
 
-    if (hookPublic || hook5m || hookFinder66 || hookAex) {
+    if (hookPublic || hook5m || hookFinder66) {
       if (all.length) {
         const channels: ChannelConfig[] = [
-          { name: 'AEX', webhook: hookAex, badge: 'Finder', ...PlotStream.AEX_PARAMS },
           { name: 'Public', webhook: hookPublic, badge: 'Finder', ...PlotStream.PUBLIC_PARAMS },
           { name: '+5M', webhook: hook5m, badge: 'Finder', ...PlotStream.FIVE_M_PARAMS },
           {
@@ -346,17 +336,8 @@ export class PlotStream {
       const bestB = Math.max(...[...b[1].byRarity.values()].flat().map((x) => x.p))
       return bestB - bestA
     })
-
-    const best = items[0]
-
     const descriptionParts = [
-      '**JOB ID**',
-      '```' + jobId + '```',
-      '',
-      best
-        ? `**Mejor:** ${best.name} — **${this.human(best.p)}/s** — ${best.rarity ?? 'Otros'}`
-        : null,
-      `**TOTAL:** ${items.length}`,
+      '**TOTAL:** ' + items.length,
       barParts.length ? barParts.join(' | ') : null,
     ].filter(Boolean) as string[]
 
@@ -364,10 +345,23 @@ export class PlotStream {
     const description =
       descriptionJoined.length > 1024 ? descriptionJoined.slice(0, 1021) + '…' : descriptionJoined
 
-    const rarityHeader = (rarity: string) => `**${rarity.trim()}**`
-
     const fields: Array<{ name: string; value: string; inline?: boolean }> = []
 
+    // --------- META: Job/Place/Join ----------
+    const placeId = PlotStream.PLACE_ID
+    const joinLink = `https://chillihub1.github.io/chillihub-joiner/?placeId=${placeId}&gameInstanceId=${encodeURIComponent(
+      jobId
+    )}`
+    const joinScript = `game:GetService("TeleportService"):TeleportToPlaceInstance(${placeId},"${jobId}",game.Players.LocalPlayer)`
+
+    fields.push(
+      { name: 'Job ID', value: '```' + jobId + '```', inline: false },
+      { name: 'Place ID', value: '```' + placeId + '```', inline: false },
+      { name: 'Join Link', value: `[Click to Join](${joinLink})`, inline: false },
+      { name: 'Join Script', value: '```' + joinScript + '```', inline: false }
+    )
+
+    // --------- DETALLE POR PLOT ----------
     for (const [plotName, group] of orderedPlots) {
       const raritiesOrdered = [...group.byRarity.entries()].sort((a, b) => {
         const maxA = Math.max(...a[1].map((x) => x.p))
@@ -382,7 +376,9 @@ export class PlotStream {
           .join('\n')
 
         const fieldName = idx === 0 ? `__**${plotName}**__` : '\u200B'
-        const value = `${rarityHeader(rarity)}${rows ? '\n' + rows : ''}`
+        const value = `${rarity.trim() ? `**${rarity.trim()}**` : '**Otros**'}${
+          rows ? '\n' + rows : ''
+        }`
 
         fields.push({
           name: fieldName,
@@ -436,7 +432,11 @@ export class PlotStream {
   }
 
   private newEmbed(title: string, description: string) {
-    const hora = new Intl.DateTimeFormat('es-MX', { timeStyle: 'medium' }).format(new Date())
+    const hora = new Intl.DateTimeFormat('es-MX', {
+      timeStyle: 'medium',
+      hour12: false,
+      timeZone: 'America/Mexico_City',
+    }).format(new Date())
     return {
       title,
       description,
