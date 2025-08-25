@@ -1,7 +1,7 @@
 // app/services/plot_stream.ts
 import axios from 'axios'
 import env from '#start/env'
-import Ws from 'App/Services/Ws' // <<<<<< NUEVO: servidor Socket.IO (Ws.io)
+import Ws from '#services/ws'
 
 type Generation = { raw: string; perSecond: number | null; ready: boolean }
 
@@ -63,8 +63,8 @@ export class PlotStream {
 
   // ====== UMBRALES BASE ======
   private static MIN_NON_SECRET = 500_000
-  private static RAINBOW_5M = 5_000_000
-  private static MAX_TEST = 5_000_000
+  private static RAINBOW_5M = 2_500_000
+  private static MAX_TEST = 2_500_000
 
   // Límites Discord
   private static MAX_FIELDS_PER_EMBED = 25
@@ -339,12 +339,13 @@ export class PlotStream {
     // Resumen por rareza
     const counts = new Map<string, number>()
     for (const it of items) {
-      const bucket = it.rarity === 'Secret' ? 'Secretos' : it.rarity ?? 'Otros'
+      const bucket = it.rarity === 'Secret' ? 'Secretos' : (it.rarity ?? 'Otros')
       counts.set(bucket, (counts.get(bucket) ?? 0) + 1)
     }
     const barParts: string[] = []
     if (counts.has('Secretos')) barParts.push(`Secretos ${counts.get('Secretos')}`)
     for (const [k, v] of [...counts.entries()]
+      // eslint-disable-next-line @typescript-eslint/no-shadow
       .filter(([k]) => k !== 'Secretos')
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
       barParts.push(`${k} ${v}`)
