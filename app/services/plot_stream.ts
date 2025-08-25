@@ -54,11 +54,10 @@ export class PlotStream {
   private buffer: { at: number; jobId: string; generatedAt: string; plots: Plot[] }[] = []
   private ttlMs = 60_000
 
-  // ====== WATCHLIST en memoria (no DB) ======
-  private watchTerms = new Set<string>() // todos en minúsculas
-
-  // Webhook PARA WATCHLIST (hardcodeado; NO usa env)
-  private static WATCH_WEBHOOK =
+  // ====== WATCHLIST en RAM (no DB): term + mutation opcional ('': sin mutation) ======
+  private watchMap = new Map<string, { term: string; mutation: string }>()
+  // Webhook para hallazgos de la watchlist (hardcodeado, sin ENV)
+  private static FIND_WEBHOOK =
     'https://discord.com/api/webhooks/1409373921320505344/3S3KykiDshWzhSjfCRs-j_txEMyzV8IhURqL3LJYGWxQLHF7irzDzzFugX2AuQACSdOk'
 
   // ====== UMBRALES BASE ======
@@ -94,22 +93,49 @@ export class PlotStream {
     maxNonSecret: PlotStream.MAX_TEST,
   }
 
+  // ====== Singleton ======
   static getInstance() {
     if (!this.instance) this.instance = new PlotStream()
     return this.instance
   }
 
-  // ====== API pública para la ruta /plots/find ======
-  addWatchTerm(term: string) {
-    const t = String(term || '')
+  // ====== API pública para rutas de watchlist ======
+  private norm(s: any) {
+    return String(s ?? '')
       .trim()
       .toLowerCase()
-    if (t) this.watchTerms.add(t)
   }
-  getWatchTerms() {
-    return Array.from(this.watchTerms.values())
+  private normMut(s: any) {
+    return this.norm(s)
+  } // '' = sin mutation
+  private watchKey(term: string, mutation: string) {
+    return `${term}|${mutation}`
   }
 
+  addWatch(termRaw: string, mutationRaw?: string | null) {
+    const term = this.norm(termRaw)
+    const mutation = this.normMut(mutationRaw) // undefined/null -> ''
+    if (!term) return null
+    const key = this.watchKey(term, mutation)
+    this.watchMap.set(key, { term, mutation })
+    return { term, mutation }
+  }
+
+  removeWatch(termRaw: string, mutationRaw?: string | null) {
+    const term = this.norm(termRaw)
+    const mutation = this.normMut(mutationRaw)
+    if (!term) return false
+    return this.watchMap.delete(this.watchKey(term, mutation))
+  }
+
+  clearWatch() {
+    this.watchMap.clear()
+  }
+  getWatchList() {
+    return Array.from(this.watchMap.values())
+  }
+
+  // ====== Buffer ======
   pushPayload(payload: JobPayload) {
     const now = Date.now()
     this.buffer.push({
@@ -138,6 +164,7 @@ export class PlotStream {
     this.buffer = this.buffer.filter((e) => e.at >= minTs)
   }
 
+  // ====== Utils ======
   parseHumanMoney(input: string | number | undefined): number | null {
     if (input === undefined || input === null) return null
     if (typeof input === 'number') return Number.isFinite(input) ? input : null
@@ -195,7 +222,7 @@ export class PlotStream {
     return out
   }
 
-  // Evalúa si un item cumple los umbrales de un canal
+  // ====== Thresholds ======
   private meetsChannelThresholds(
     item: { p: number; rarity?: string },
     cfg: ChannelParams
@@ -203,29 +230,34 @@ export class PlotStream {
     const isSecret = item.rarity === 'Secret'
     const min = isSecret ? cfg.minSecret : cfg.minNonSecret
     const max = isSecret ? cfg.maxSecret : cfg.maxNonSecret
-
     if (typeof min === 'number' && item.p < min) return false
     if (typeof max === 'number' && item.p > max) return false
     return true
   }
 
   /**
-   * Enrutamiento por canal (según thresholds) + ESCANEO de watchlist (por nombre).
+   * Enrutamiento independiente por canal (thresholds) + escaneo de watchlist (nombre+mutation).
+   * - DISCORD_WEBHOOK_PUBLIC
+   * - DISCORD_WEBHOOK_5M
+   * - DISCORD_WEBHOOK_FINDER66
+   * - WATCHLIST -> FIND_WEBHOOK (hardcode)
    */
   async emitToDiscord(jobId: string, plots: Plot[]) {
     const hookPublic = env.get('DISCORD_WEBHOOK_PUBLIC') || null
     const hook5m = env.get('DISCORD_WEBHOOK_5M') || null
     const hookFinder66 = env.get('DISCORD_WEBHOOK_FINDER66') || null
 
-    if (!hookPublic && !hook5m && !hookFinder66 && this.watchTerms.size === 0) {
-      console.warn('[PlotStream] No webhooks configurados ni watchlist activa; skipping post.')
+    if (!hookPublic && !hook5m && !hookFinder66 && this.watchMap.size === 0) {
+      console.warn(
+        '[PlotStream] No Discord webhooks configurados ni watchlist activa; skipping post.'
+      )
       return
     }
 
+    // ---- Bloque de canales con thresholds (igual a tu flujo base) ----
     type Item = { name: string; p: number; plot: string; rarity?: string }
     const all: Item[] = []
 
-    // Normalización tolerante de perSecond
     for (const plot of plots) {
       for (const ap of plot.animalPodiums) {
         const anyAp = ap as any
@@ -245,24 +277,11 @@ export class PlotStream {
       }
     }
 
-    // Canales con thresholds (si hay webhooks)
     if (hookPublic || hook5m || hookFinder66) {
-      if (!all.length) {
-        console.log('[PlotStream] emitToDiscord: no items for thresholded channels; skipping.')
-      } else {
+      if (all.length) {
         const channels: ChannelConfig[] = [
-          {
-            name: 'Public',
-            webhook: hookPublic,
-            badge: 'Public',
-            ...PlotStream.PUBLIC_PARAMS,
-          },
-          {
-            name: '+5M',
-            webhook: hook5m,
-            badge: '+5M',
-            ...PlotStream.FIVE_M_PARAMS,
-          },
+          { name: 'Public', webhook: hookPublic, badge: 'Public', ...PlotStream.PUBLIC_PARAMS },
+          { name: '+5M', webhook: hook5m, badge: '+5M', ...PlotStream.FIVE_M_PARAMS },
           {
             name: 'Finder66',
             webhook: hookFinder66,
@@ -270,19 +289,19 @@ export class PlotStream {
             ...PlotStream.FINDER66_PARAMS,
           },
         ]
-
         for (const ch of channels) {
           if (!ch.webhook) continue
           const eligible = all.filter((it) => this.meetsChannelThresholds(it, ch))
           if (!eligible.length) continue
-
           const embeds = this.buildEmbedsMarkdown(jobId, eligible, { scopeBadge: ch.badge })
           await this.postInChunks([ch.webhook], embeds)
         }
+      } else {
+        console.log('[PlotStream] emitToDiscord: no items for thresholded channels; skipping.')
       }
     }
 
-    // SIEMPRE: escaneo de watchlist (ignora rarity/thresholds), emite a WATCH_WEBHOOK si hay hits
+    // ---- Escaneo de watchlist: nombre + mutation (opcional) ----
     await this.scanAndEmitWatches(jobId, plots)
   }
 
@@ -290,9 +309,7 @@ export class PlotStream {
   private buildEmbedsMarkdown(
     jobId: string,
     itemsRaw: Array<{ name: string; p: number; plot: string; rarity?: string }>,
-    opts?: {
-      scopeBadge?: string // p.ej. "Public", "+5M", "Finder66"
-    }
+    opts?: { scopeBadge?: string }
   ) {
     const items = [...itemsRaw].sort((a, b) => b.p - a.p)
 
@@ -329,6 +346,7 @@ export class PlotStream {
       return bestB - bestA
     })
 
+    // ===== TOP: JOB ID + triángulos + Mejor + totales =====
     const best = items[0]
     const TRIANGLES = '△▽△▽△▽△▽△▽△▽△▽△▽ △▽△▽△▽△▽△▽△▽△▽△▽'
 
@@ -348,11 +366,14 @@ export class PlotStream {
     const description =
       descriptionJoined.length > 1024 ? descriptionJoined.slice(0, 1021) + '…' : descriptionJoined
 
+    // Helpers
     const rarityHeader = (rarity: string) => `**${rarity.trim()}**`
 
+    // Fields
     const fields: Array<{ name: string; value: string; inline?: boolean }> = []
 
     for (const [plotName, group] of orderedPlots) {
+      // ordenar rarezas por su mejor p
       const raritiesOrdered = [...group.byRarity.entries()].sort((a, b) => {
         const maxA = Math.max(...a[1].map((x) => x.p))
         const maxB = Math.max(...b[1].map((x) => x.p))
@@ -365,6 +386,7 @@ export class PlotStream {
           .map((it) => `• ${it.name} — **${this.human(it.p)}/s**`)
           .join('\n')
 
+        // primer bloque: header con nombre de la base; siguientes usan ZWSP para no repetir
         const fieldName = idx === 0 ? `__**${plotName}**__` : '\u200B'
         const value = `${rarityHeader(rarity)}${rows ? '\n' + rows : ''}`
 
@@ -492,120 +514,58 @@ export class PlotStream {
     return `${+n.toFixed(3)}`
   }
 
-  // ====== WATCHLIST: escaneo y emisión ======
+  // ====== WATCHLIST: escaneo y emisión con MISMO formato que otros hooks ======
   private async scanAndEmitWatches(jobId: string, plots: Plot[]) {
-    if (this.watchTerms.size === 0) return
+    if (this.watchMap.size === 0) return
 
-    type Hit = {
-      term: string
-      plotSign: string
-      index: number | string
-      displayName: string
-      rarity: string | null
-      perSecond: number | null
-      timestamp: string
-    }
+    // Reutilizamos el mismo formato de embed usando buildEmbedsMarkdown(jobId, items, { scopeBadge: 'Find' })
+    type Item = { name: string; p: number; plot: string; rarity?: string }
+    const items: Item[] = []
 
-    const hits: Hit[] = []
     for (const plot of plots) {
       for (const ap of plot.animalPodiums) {
         const anyAp = ap as any
         if (anyAp?.empty) continue
         const a = ap as any
-        const name: string = a?.displayName || ''
+
+        const name = String(a?.displayName || '')
         if (!name) continue
-        const low = name.toLowerCase()
+        const nameLow = this.norm(name)
+        const itemMut = this.normMut(a?.mutation) // '' si no trae mutation
 
-        // ¿coincide con alguno de los términos vigilados?
-        for (const term of this.watchTerms) {
-          if (!term) continue
-          if (low.includes(term)) {
-            // p/s es solo informativo
-            let perSecond: number | null = null
-            const rawP = a?.generation?.perSecond
-            if (typeof rawP === 'number' && Number.isFinite(rawP)) perSecond = rawP
-            else if (typeof rawP === 'string') {
-              const cleaned = rawP.trim().replace(/\/s$/i, '').replace(/^\$/, '')
-              perSecond = this.parseHumanMoney(cleaned)
-            }
-
-            hits.push({
-              term,
-              plotSign: plot.plotSign,
-              index: a.index,
-              displayName: name,
-              rarity: a.rarity ?? null,
-              perSecond,
-              timestamp: plot.meta?.timestamp ?? '',
-            })
-            break // evita duplicar si varios términos coinciden
+        // ¿coincide con alguna entrada de watchlist? (nombre substring + mutation exacta o '' = sin mutation)
+        let matched = false
+        for (const { term, mutation } of this.watchMap.values()) {
+          if (!nameLow.includes(term)) continue
+          const okMut = mutation === '' ? itemMut === '' : itemMut === mutation
+          if (okMut) {
+            matched = true
+            break
           }
         }
-      }
-    }
+        if (!matched) continue
 
-    if (!hits.length) return
+        // p/s solo para ordenar/mostrar (si no hay, 0)
+        let p: number | null = null
+        const rawP = a?.generation?.perSecond
+        if (typeof rawP === 'number' && Number.isFinite(rawP)) p = rawP
+        else if (typeof rawP === 'string') {
+          const cleaned = rawP.trim().replace(/\/s$/i, '').replace(/^\$/, '')
+          p = this.parseHumanMoney(cleaned)
+        }
 
-    const embeds = this.buildWatchEmbeds(jobId, hits)
-    await this.postInChunks([PlotStream.WATCH_WEBHOOK], embeds)
-  }
-
-  private buildWatchEmbeds(
-    jobId: string,
-    hits: Array<{
-      term: string
-      plotSign: string
-      index: number | string
-      displayName: string
-      rarity: string | null
-      perSecond: number | null
-      timestamp: string
-    }>
-  ) {
-    // Group: term -> plot -> rows
-    const byTerm = new Map<string, Map<string, typeof hits>>()
-
-    for (const h of hits) {
-      const gTerm = byTerm.get(h.term) ?? new Map()
-      const gPlot = gTerm.get(h.plotSign) ?? []
-      gPlot.push(h)
-      gTerm.set(h.plotSign, gPlot)
-      byTerm.set(h.term, gTerm)
-    }
-
-    const fields: Array<{ name: string; value: string; inline?: boolean }> = []
-    for (const [term, byPlot] of byTerm.entries()) {
-      // dentro del término, ordenar plots por mejor p/s
-      const plotsOrdered = [...byPlot.entries()].sort((a, b) => {
-        const bestA = Math.max(...a[1].map((x) => x.perSecond ?? -1))
-        const bestB = Math.max(...b[1].map((x) => x.perSecond ?? -1))
-        return bestB - bestA
-      })
-
-      for (const [plotSign, rows] of plotsOrdered) {
-        const body = rows
-          .sort((a, b) => (b.perSecond ?? -1) - (a.perSecond ?? -1))
-          .map((r) => {
-            const rar = r.rarity ? `[${r.rarity}]` : ''
-            const psec = r.perSecond !== null ? `${this.human(r.perSecond)}/s` : '—'
-            const idx = typeof r.index === 'number' ? `#${r.index}` : `(${r.index})`
-            return `• ${idx} ${r.displayName} ${rar} — ${psec}`
-          })
-          .join('\n')
-
-        fields.push({
-          name: `__**${term}**__ • ${plotSign}`,
-          value:
-            body.length > PlotStream.MAX_FIELD_VALUE
-              ? body.slice(0, PlotStream.MAX_FIELD_VALUE - 1) + '…'
-              : body,
-          inline: false,
+        items.push({
+          name,
+          p: p ?? 0,
+          plot: plot.plotSign,
+          rarity: a?.rarity,
         })
       }
     }
 
-    const title = `SauWatch • JOB ${jobId}`
-    const description = `Coincidencias por watchlist (nombre contiene término). Total: ${hits.length}`
-    return this.packEmbeds(title, description, fields)
+    if (!items.length) return
+
+    const embeds = this.buildEmbedsMarkdown(jobId, items, { scopeBadge: 'Find' })
+    await this.postInChunks([PlotStream.FIND_WEBHOOK], embeds)
   }
 }

@@ -9,17 +9,37 @@ router.get('/servers', [PlotsController, 'servers'])
 router.get('/', async () => ({ ok: true, service: 'bot-brainrot', time: new Date().toISOString() }))
 router.get('/health', async () => ({ ok: true }))
 
-// NUEVO: guarda en memoria (API) qué nombre(s) vigilar. No usa DB.
+// === WATCHLIST: agregar (q + mutation opcional)
+// Nota: si no envías "mutation", se guarda como "sin mutation" (match SOLO ítems sin mutation).
 router.post('/plots/find', async ({ request, response }) => {
   const term = String(
     request.input('q') ?? request.input('term') ?? request.input('name') ?? ''
   ).trim()
-
-  if (!term) {
-    return response.badRequest({ ok: false, error: 'Falta "q" (o "term"/"name") en el body.' })
-  }
+  const mutation = request.input('mutation') ?? request.input('mut') ?? null // null -> se normaliza a '' (sin mutation)
+  if (!term) return response.badRequest({ ok: false, error: 'Falta "q" (o "term"/"name")' })
 
   const stream = PlotStream.getInstance()
-  stream.addWatchTerm(term) // guarda en RAM (singleton)
-  return response.ok({ ok: true, watching: stream.getWatchTerms() })
+  const added = stream.addWatch(term, mutation)
+  return response.ok({ ok: true, added, watching: stream.getWatchList() })
+})
+
+// === WATCHLIST: remover (q + mutation opcional)
+// Si omites mutation aquí, quita la entrada “sin mutation” del término.
+router.delete('/plots/find', async ({ request, response }) => {
+  const term = String(
+    request.input('q') ?? request.input('term') ?? request.input('name') ?? ''
+  ).trim()
+  const mutation = request.input('mutation') ?? request.input('mut') ?? null
+  if (!term) return response.badRequest({ ok: false, error: 'Falta "q" (o "term"/"name")' })
+
+  const stream = PlotStream.getInstance()
+  const removed = stream.removeWatch(term, mutation)
+  return response.ok({ ok: true, removed, watching: stream.getWatchList() })
+})
+
+// === WATCHLIST: limpiar todo
+router.delete('/plots/find/all', async ({ response }) => {
+  const stream = PlotStream.getInstance()
+  stream.clearWatch()
+  return response.ok({ ok: true, watching: [] })
 })
