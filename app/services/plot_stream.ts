@@ -67,10 +67,10 @@ export class PlotStream {
 
   // ====== GRUPOS DE PARÁMETROS (sin colores) ======
   private static PUBLIC_PARAMS: ChannelParams = {
-    minSecret: 0,
-    maxSecret: undefined,
+    minSecret: 300_000,
+    maxSecret: PlotStream.MAX_TEST,
     minNonSecret: PlotStream.MIN_NON_SECRET,
-    maxNonSecret: undefined,
+    maxNonSecret: PlotStream.MAX_TEST,
   }
 
   private static FIVE_M_PARAMS: ChannelParams = {
