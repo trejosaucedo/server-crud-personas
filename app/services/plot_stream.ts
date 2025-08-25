@@ -1,7 +1,9 @@
+// app/services/plot_stream.ts
 import axios from 'axios'
 import env from '#start/env'
 
 type Generation = { raw: string; perSecond: number | null; ready: boolean }
+
 type AnimalEmpty = { index: number | string; empty: true }
 type AnimalFull = {
   index: number | string
@@ -11,15 +13,29 @@ type AnimalFull = {
   rarity: string
   generation: Generation
 }
+
 type AnimalPodium = AnimalEmpty | AnimalFull
+
 type Plot = {
   plotSign: string
   remainingTime: { raw: string | null; seconds: number | null }
   animalPodiums: AnimalPodium[]
   meta: { timestamp: string }
 }
-type JobPayload = { jobId: string; generatedAt: string; plots: Plot[] }
-type FilterQuery = { mutation?: string; rarity?: string; minPerSecond?: number }
+
+type JobPayload = {
+  jobId: string
+  generatedAt: string
+  plots: Plot[]
+}
+
+type FilterQuery = {
+  mutation?: string
+  rarity?: string
+  minPerSecond?: number
+}
+
+// ============== PARAMS POR CANAL (sin colores) ==============
 type ChannelParams = {
   minSecret?: number
   maxSecret?: number
@@ -27,45 +43,69 @@ type ChannelParams = {
   maxNonSecret?: number
 }
 
+type ChannelConfig = ChannelParams & {
+  name: string
+  webhook: string | null
+  badge?: string
+}
+
 export class PlotStream {
   private static instance: PlotStream
   private buffer: { at: number; jobId: string; generatedAt: string; plots: Plot[] }[] = []
   private ttlMs = 60_000
+
   private watchMap = new Map<string, { term: string; mutation: string }>()
-  private static FIND_WEBHOOK =
-    'https://discord.com/api/webhooks/1409373921320505344/3S3KykiDshWzhSjfCRs-j_txEMyzV8IhURqL3LJYGWxQLHF7irzDzzFugX2AuQACSdOk'
   private static readonly AEX_HOOK =
     'https://discord.com/api/webhooks/1407888137669312552/RGgCno4t0JwLn0sHUc2FbG089D0yZdrxjdTVHPAh2fGacIqILMByO0UipRiCv-zPoLuK'
+
+  // ====== UMBRALES BASE ======
   private static MIN_NON_SECRET = 500_000
-  private static MAX_TEST = 2_500_000
+  private static RAINBOW_5M = 5_000_000
+  private static MAX_TEST = 5_000_000
+
+  // Límites Discord
   private static MAX_FIELDS_PER_EMBED = 25
   private static MAX_EMBEDS_PER_MESSAGE = 10
   private static MAX_FIELD_VALUE = 1024
   private static MAX_EMBED_CHARS = 5500
+
+  // ====== GRUPOS DE PARÁMETROS (sin colores) ======
   private static PUBLIC_PARAMS: ChannelParams = {
     minSecret: 300_000,
     maxSecret: PlotStream.MAX_TEST,
     minNonSecret: PlotStream.MIN_NON_SECRET,
     maxNonSecret: PlotStream.MAX_TEST,
   }
+
+  private static FIVE_M_PARAMS: ChannelParams = {
+    minSecret: PlotStream.RAINBOW_5M,
+    maxSecret: undefined,
+    minNonSecret: PlotStream.RAINBOW_5M,
+    maxNonSecret: undefined,
+  }
+
   private static FINDER66_PARAMS: ChannelParams = {
     minSecret: 300_000,
     maxSecret: PlotStream.MAX_TEST,
     minNonSecret: PlotStream.MIN_NON_SECRET,
     maxNonSecret: PlotStream.MAX_TEST,
   }
-  private static SECRETS_1_5M_PARAMS: ChannelParams = {
-    minSecret: 1_500_000,
+
+  // Solo Secret >= 550k (max ilimitado). Para excluir no-secret, maxNonSecret: 0
+  private static AEX_PARAMS: ChannelParams = {
+    minSecret: 550_000,
     maxSecret: undefined,
     minNonSecret: undefined,
-    maxNonSecret: undefined,
+    maxNonSecret: 0,
   }
 
+  // ====== Singleton ======
   static getInstance() {
     if (!this.instance) this.instance = new PlotStream()
     return this.instance
   }
 
+  // ====== API pública para rutas de watchlist ======
   private norm(s: any) {
     return String(s ?? '')
       .trim()
@@ -73,7 +113,7 @@ export class PlotStream {
   }
   private normMut(s: any) {
     return this.norm(s)
-  }
+  } // '' = sin mutation
   private watchKey(term: string, mutation: string) {
     return `${term}|${mutation}`
   }
@@ -101,6 +141,7 @@ export class PlotStream {
     return Array.from(this.watchMap.values())
   }
 
+  // ====== Buffer ======
   pushPayload(payload: JobPayload) {
     const now = Date.now()
     this.buffer.push({
@@ -129,6 +170,7 @@ export class PlotStream {
     this.buffer = this.buffer.filter((e) => e.at >= minTs)
   }
 
+  // ====== Utils ======
   parseHumanMoney(input: string | number | undefined): number | null {
     if (input === undefined || input === null) return null
     if (typeof input === 'number') return Number.isFinite(input) ? input : null
@@ -186,6 +228,7 @@ export class PlotStream {
     return out
   }
 
+  // ====== Thresholds ======
   private meetsChannelThresholds(
     item: { p: number; rarity?: string },
     cfg: ChannelParams
@@ -198,19 +241,33 @@ export class PlotStream {
     return true
   }
 
+  /**
+   * Enrutamiento independiente por canal (thresholds)
+   * - DISCORD_WEBHOOK_PUBLIC
+   * - DISCORD_WEBHOOK_5M
+   * - DISCORD_WEBHOOK_FINDER66
+   * - AEX_HOOK (hardcode) → solo Secret >= 550k
+   */
   async emitToDiscord(jobId: string, plots: Plot[]) {
     const hookPublic = env.get('DISCORD_WEBHOOK_PUBLIC') || null
+    const hook5m = env.get('DISCORD_WEBHOOK_5M') || null
     const hookFinder66 = env.get('DISCORD_WEBHOOK_FINDER66') || null
     const hookAex = PlotStream.AEX_HOOK
-    if (!hookPublic && !hookFinder66 && !hookAex && this.watchMap.size === 0) return
+
+    if (!hookPublic && !hook5m && !hookFinder66 && !hookAex) {
+      console.warn('[PlotStream] No Discord webhooks configurados; skipping post.')
+      return
+    }
 
     type Item = { name: string; p: number; plot: string; rarity?: string }
     const all: Item[] = []
+
     for (const plot of plots) {
       for (const ap of plot.animalPodiums) {
         const anyAp = ap as any
         if (anyAp?.empty) continue
         const a = ap as any
+
         let p: number | null = null
         const rawP = a?.generation?.perSecond
         if (typeof rawP === 'number' && Number.isFinite(rawP)) p = rawP
@@ -219,33 +276,45 @@ export class PlotStream {
           p = this.parseHumanMoney(cleaned)
         }
         if (p === null) continue
+
         all.push({ name: a.displayName, p, plot: plot.plotSign, rarity: a.rarity })
       }
     }
 
-    if (all.length) {
-      const channels = [
-        { name: 'AEX', webhook: hookAex, ...PlotStream.SECRETS_1_5M_PARAMS }, // Solo Secretos >= 1.5M
-        { name: 'Finder66', webhook: hookFinder66, ...PlotStream.FINDER66_PARAMS },
-        { name: 'Public', webhook: hookPublic, ...PlotStream.PUBLIC_PARAMS },
-      ]
-      for (const ch of channels) {
-        if (!ch.webhook) continue
-        const eligible = all.filter((it) => this.meetsChannelThresholds(it, ch))
-        if (!eligible.length) continue
-        const embeds = this.buildEmbedsMarkdown(jobId, eligible)
-        await this.postInChunks([ch.webhook], embeds)
+    if (hookPublic || hook5m || hookFinder66 || hookAex) {
+      if (all.length) {
+        const channels: ChannelConfig[] = [
+          { name: 'AEX', webhook: hookAex, badge: 'Finder', ...PlotStream.AEX_PARAMS },
+          { name: 'Public', webhook: hookPublic, badge: 'Finder', ...PlotStream.PUBLIC_PARAMS },
+          { name: '+5M', webhook: hook5m, badge: 'Finder', ...PlotStream.FIVE_M_PARAMS },
+          {
+            name: 'Finder66',
+            webhook: hookFinder66,
+            badge: 'Finder',
+            ...PlotStream.FINDER66_PARAMS,
+          },
+        ]
+        for (const ch of channels) {
+          if (!ch.webhook) continue
+          const eligible = all.filter((it) => this.meetsChannelThresholds(it, ch))
+          if (!eligible.length) continue
+          const embeds = this.buildEmbedsMarkdown(jobId, eligible, { scopeBadge: ch.badge })
+          await this.postInChunks([ch.webhook], embeds)
+        }
+      } else {
+        console.log('[PlotStream] emitToDiscord: no items; skipping.')
       }
     }
-
-    await this.scanAndEmitWatches(jobId, plots)
   }
 
+  // ===================== RENDER (Markdown ligero) =====================
   private buildEmbedsMarkdown(
     jobId: string,
-    itemsRaw: Array<{ name: string; p: number; plot: string; rarity?: string }>
+    itemsRaw: Array<{ name: string; p: number; plot: string; rarity?: string }>,
+    _opts?: { scopeBadge?: string }
   ) {
     const items = [...itemsRaw].sort((a, b) => b.p - a.p)
+
     const counts = new Map<string, number>()
     for (const it of items) {
       const bucket = it.rarity === 'Secret' ? 'Secretos' : (it.rarity ?? 'Otros')
@@ -254,7 +323,8 @@ export class PlotStream {
     const barParts: string[] = []
     if (counts.has('Secretos')) barParts.push(`Secretos ${counts.get('Secretos')}`)
     for (const [k, v] of [...counts.entries()]
-      .filter(([kk]) => kk !== 'Secretos')
+      // eslint-disable-next-line @typescript-eslint/no-shadow
+      .filter(([k]) => k !== 'Secretos')
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
       barParts.push(`${k} ${v}`)
     }
@@ -278,6 +348,7 @@ export class PlotStream {
     })
 
     const best = items[0]
+
     const descriptionParts = [
       '**JOB ID**',
       '```' + jobId + '```',
@@ -288,11 +359,13 @@ export class PlotStream {
       `**TOTAL:** ${items.length}`,
       barParts.length ? barParts.join(' | ') : null,
     ].filter(Boolean) as string[]
+
     const descriptionJoined = descriptionParts.join('\n')
     const description =
       descriptionJoined.length > 1024 ? descriptionJoined.slice(0, 1021) + '…' : descriptionJoined
 
     const rarityHeader = (rarity: string) => `**${rarity.trim()}**`
+
     const fields: Array<{ name: string; value: string; inline?: boolean }> = []
 
     for (const [plotName, group] of orderedPlots) {
@@ -301,13 +374,16 @@ export class PlotStream {
         const maxB = Math.max(...b[1].map((x) => x.p))
         return maxB - maxA
       })
+
       raritiesOrdered.forEach(([rarity, arr], idx) => {
         const rows = arr
           .sort((a, b) => b.p - a.p)
           .map((it) => `• ${it.name} — **${this.human(it.p)}/s**`)
           .join('\n')
+
         const fieldName = idx === 0 ? `__**${plotName}**__` : '\u200B'
         const value = `${rarityHeader(rarity)}${rows ? '\n' + rows : ''}`
+
         fields.push({
           name: fieldName,
           value:
@@ -319,9 +395,11 @@ export class PlotStream {
       })
     }
 
-    return this.packEmbeds('SauNotify', description, fields)
+    const title = 'Finder'
+    return this.packEmbeds(title, description, fields)
   }
 
+  // ---- Empaquetado por límites de Discord ----
   private packEmbeds(
     title: string,
     description: string,
@@ -331,12 +409,14 @@ export class PlotStream {
     let current = this.newEmbed(title, description)
     let fieldCount = 0
     let chars = this.embedSize(current)
+
     for (const f of fields) {
       const chunks = this.chunkFieldValue(f.value, PlotStream.MAX_FIELD_VALUE)
       for (const [i, chunk] of chunks.entries()) {
         const name = i === 0 ? f.name : `${f.name} (cont.)`
         const field = { name, value: chunk, inline: false }
         const addSize = name.length + chunk.length + 10
+
         const wouldOverflow =
           fieldCount >= PlotStream.MAX_FIELDS_PER_EMBED ||
           chars + addSize > PlotStream.MAX_EMBED_CHARS
@@ -356,11 +436,11 @@ export class PlotStream {
   }
 
   private newEmbed(title: string, description: string) {
-    const now = new Date()
-    const hora = new Intl.DateTimeFormat('es-MX', { timeStyle: 'medium' }).format(now)
+    const hora = new Intl.DateTimeFormat('es-MX', { timeStyle: 'medium' }).format(new Date())
     return {
       title,
       description,
+      color: 0x2ecc71,
       fields: [] as any[],
       footer: {
         text: `Hoy a las ${hora} • by qsau`,
@@ -400,12 +480,22 @@ export class PlotStream {
     try {
       const r = await axios.post(url, payload, { validateStatus: () => true })
       if (r.status < 200 || r.status >= 300) {
+        console.error('Discord POST failed', { url, status: r.status, data: r.data })
         if (r.status === 429) {
           const retry = Number(r.headers?.['retry-after'] ?? 0)
           if (retry > 0 && retry < 10_000) await new Promise((res) => setTimeout(res, retry * 1000))
         }
+      } else {
+        console.log('Discord POST ok', { url, status: r.status })
       }
-    } catch {}
+    } catch (err: any) {
+      console.error('Discord POST error', {
+        url,
+        msg: err?.message,
+        status: err?.response?.status,
+        data: err?.response?.data,
+      })
+    }
   }
 
   private human(n: number): string {
@@ -414,43 +504,5 @@ export class PlotStream {
     if (n >= 1e6) return `${+(n / 1e6).toFixed(3)}M`
     if (n >= 1e3) return `${+(n / 1e3).toFixed(3)}K`
     return `${+n.toFixed(3)}`
-  }
-
-  private async scanAndEmitWatches(jobId: string, plots: Plot[]) {
-    if (this.watchMap.size === 0) return
-    type Item = { name: string; p: number; plot: string; rarity?: string }
-    const items: Item[] = []
-    for (const plot of plots) {
-      for (const ap of plot.animalPodiums) {
-        const anyAp = ap as any
-        if (anyAp?.empty) continue
-        const a = ap as any
-        const name = String(a?.displayName || '')
-        if (!name) continue
-        const nameLow = this.norm(name)
-        const itemMut = this.normMut(a?.mutation)
-        let matched = false
-        for (const { term, mutation } of this.watchMap.values()) {
-          if (!nameLow.includes(term)) continue
-          const okMut = mutation === '' ? itemMut === '' : itemMut === mutation
-          if (okMut) {
-            matched = true
-            break
-          }
-        }
-        if (!matched) continue
-        let p: number | null = null
-        const rawP = a?.generation?.perSecond
-        if (typeof rawP === 'number' && Number.isFinite(rawP)) p = rawP
-        else if (typeof rawP === 'string') {
-          const cleaned = rawP.trim().replace(/\/s$/i, '').replace(/^\$/, '')
-          p = this.parseHumanMoney(cleaned)
-        }
-        items.push({ name, p: p ?? 0, plot: plot.plotSign, rarity: a?.rarity })
-      }
-    }
-    if (!items.length) return
-    const embeds = this.buildEmbedsMarkdown(jobId, items)
-    await this.postInChunks([PlotStream.FIND_WEBHOOK], embeds)
   }
 }
