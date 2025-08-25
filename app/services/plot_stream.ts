@@ -322,6 +322,7 @@ export class PlotStream {
     const barParts: string[] = []
     if (counts.has('Secretos')) barParts.push(`Secretos ${counts.get('Secretos')}`)
     for (const [k, v] of [...counts.entries()]
+      // eslint-disable-next-line @typescript-eslint/no-shadow
       .filter(([k]) => k !== 'Secretos')
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
       barParts.push(`${k} ${v}`)
