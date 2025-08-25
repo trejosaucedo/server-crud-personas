@@ -18,6 +18,8 @@ type Plot = {
   animalPodiums: AnimalPodium[]
   meta: { timestamp: string }
 }
+type JobPayload = { jobId: string; generatedAt: string; plots: Plot[] }
+type FilterQuery = { mutation?: string; rarity?: string; minPerSecond?: number }
 type ChannelParams = {
   minSecret?: number
   maxSecret?: number
@@ -27,11 +29,14 @@ type ChannelParams = {
 
 export class PlotStream {
   private static instance: PlotStream
+  private buffer: { at: number; jobId: string; generatedAt: string; plots: Plot[] }[] = []
+  private ttlMs = 60_000
   private watchMap = new Map<string, { term: string; mutation: string }>()
   private static FIND_WEBHOOK =
     'https://discord.com/api/webhooks/1409373921320505344/3S3KykiDshWzhSjfCRs-j_txEMyzV8IhURqL3LJYGWxQLHF7irzDzzFugX2AuQACSdOk'
+  private static readonly AEX_HOOK =
+    'https://discord.com/api/webhooks/1407888137669312552/RGgCno4t0JwLn0sHUc2FbG089D0yZdrxjdTVHPAh2fGacIqILMByO0UipRiCv-zPoLuK'
   private static MIN_NON_SECRET = 500_000
-  private static RAINBOW_5M = 2_500_000
   private static MAX_TEST = 2_500_000
   private static MAX_FIELDS_PER_EMBED = 25
   private static MAX_EMBEDS_PER_MESSAGE = 10
@@ -43,17 +48,17 @@ export class PlotStream {
     minNonSecret: PlotStream.MIN_NON_SECRET,
     maxNonSecret: PlotStream.MAX_TEST,
   }
-  private static FIVE_M_PARAMS: ChannelParams = {
-    minSecret: PlotStream.RAINBOW_5M,
-    maxSecret: undefined,
-    minNonSecret: PlotStream.RAINBOW_5M,
-    maxNonSecret: undefined,
-  }
   private static FINDER66_PARAMS: ChannelParams = {
     minSecret: 300_000,
     maxSecret: PlotStream.MAX_TEST,
     minNonSecret: PlotStream.MIN_NON_SECRET,
     maxNonSecret: PlotStream.MAX_TEST,
+  }
+  private static SECRETS_1_5M_PARAMS: ChannelParams = {
+    minSecret: 1_500_000,
+    maxSecret: undefined,
+    minNonSecret: undefined,
+    maxNonSecret: undefined,
   }
 
   static getInstance() {
@@ -62,7 +67,9 @@ export class PlotStream {
   }
 
   private norm(s: any) {
-    return String(s ?? '').trim().toLowerCase()
+    return String(s ?? '')
+      .trim()
+      .toLowerCase()
   }
   private normMut(s: any) {
     return this.norm(s)
@@ -94,7 +101,35 @@ export class PlotStream {
     return Array.from(this.watchMap.values())
   }
 
-  private parseHumanMoney(input: string | number | undefined): number | null {
+  pushPayload(payload: JobPayload) {
+    const now = Date.now()
+    this.buffer.push({
+      at: now,
+      jobId: payload.jobId,
+      generatedAt: payload.generatedAt,
+      plots: payload.plots,
+    })
+    this.gc(now)
+  }
+
+  dump(): Plot[] {
+    this.gc(Date.now())
+    const out: Plot[] = []
+    for (const chunk of this.buffer) out.push(...chunk.plots)
+    return out
+  }
+
+  dumpJobs(): JobPayload[] {
+    this.gc(Date.now())
+    return this.buffer.map((b) => ({ jobId: b.jobId, generatedAt: b.generatedAt, plots: b.plots }))
+  }
+
+  private gc(now = Date.now()) {
+    const minTs = now - this.ttlMs
+    this.buffer = this.buffer.filter((e) => e.at >= minTs)
+  }
+
+  parseHumanMoney(input: string | number | undefined): number | null {
     if (input === undefined || input === null) return null
     if (typeof input === 'number') return Number.isFinite(input) ? input : null
     const raw = String(input).trim().toLowerCase()
@@ -103,7 +138,8 @@ export class PlotStream {
     if (m) {
       const num = Number.parseFloat(m[1])
       const suf = m[2].toLowerCase()
-      const mult = suf === 'k' ? 1e3 : suf === 'm' ? 1e6 : suf === 'b' ? 1e9 : suf === 't' ? 1e12 : 1
+      const mult =
+        suf === 'k' ? 1e3 : suf === 'm' ? 1e6 : suf === 'b' ? 1e9 : suf === 't' ? 1e12 : 1
       return num * mult
     }
     const asNum = Number(raw)
@@ -111,7 +147,49 @@ export class PlotStream {
     return null
   }
 
-  private meetsChannelThresholds(item: { p: number; rarity?: string }, cfg: ChannelParams): boolean {
+  filter(q: FilterQuery) {
+    const min = q.minPerSecond ?? null
+    const out: Array<{
+      plotSign: string
+      index: number | string
+      displayName: string
+      mutation: string
+      rarity: string
+      generation: { raw: string; perSecond: number | null }
+      timestamp: string
+    }> = []
+    for (const chunk of this.buffer) {
+      for (const plot of chunk.plots) {
+        for (const a of plot.animalPodiums) {
+          if ((a as AnimalEmpty).empty) continue
+          const full = a as AnimalFull
+          if (q.mutation && full.mutation !== q.mutation) continue
+          if (q.rarity && full.rarity !== q.rarity) continue
+          const psec = full.generation?.perSecond ?? null
+          if (min !== null) {
+            if (psec === null || psec < min) continue
+          } else {
+            if (psec === null) continue
+          }
+          out.push({
+            plotSign: plot.plotSign,
+            index: full.index,
+            displayName: full.displayName,
+            mutation: full.mutation,
+            rarity: full.rarity,
+            generation: { raw: full.generation.raw, perSecond: psec },
+            timestamp: plot.meta.timestamp,
+          })
+        }
+      }
+    }
+    return out
+  }
+
+  private meetsChannelThresholds(
+    item: { p: number; rarity?: string },
+    cfg: ChannelParams
+  ): boolean {
     const isSecret = item.rarity === 'Secret'
     const min = isSecret ? cfg.minSecret : cfg.minNonSecret
     const max = isSecret ? cfg.maxSecret : cfg.maxNonSecret
@@ -122,10 +200,9 @@ export class PlotStream {
 
   async emitToDiscord(jobId: string, plots: Plot[]) {
     const hookPublic = env.get('DISCORD_WEBHOOK_PUBLIC') || null
-    const hook5m =
-      'https://discord.com/api/webhooks/1407888137669312552/RGgCno4t0JwLn0sHUc2FbG089D0yZdrxjdTVHPAh2fGacIqILMByO0UipRiCv-zPoLuK'
     const hookFinder66 = env.get('DISCORD_WEBHOOK_FINDER66') || null
-    if (!hookPublic && !hook5m && !hookFinder66 && this.watchMap.size === 0) return
+    const hookAex = PlotStream.AEX_HOOK
+    if (!hookPublic && !hookFinder66 && !hookAex && this.watchMap.size === 0) return
 
     type Item = { name: string; p: number; plot: string; rarity?: string }
     const all: Item[] = []
@@ -146,30 +223,18 @@ export class PlotStream {
       }
     }
 
-    const channels = [
-      { name: '+5M', webhook: hook5m, badge: '+5M', ...PlotStream.FIVE_M_PARAMS },
-      { name: 'Finder66', webhook: hookFinder66, badge: 'Finder66', ...PlotStream.FINDER66_PARAMS },
-      { name: 'Public', webhook: hookPublic, badge: 'Public', ...PlotStream.PUBLIC_PARAMS },
-    ] as const
-
-    let chosenWebhook: string | null = null
-    let chosenBadge: string | undefined
-    let chosenItems: Item[] = []
-
-    if (all.length && (hookPublic || hook5m || hookFinder66)) {
+    if (all.length) {
+      const channels = [
+        { name: 'AEX', webhook: hookAex, ...PlotStream.SECRETS_1_5M_PARAMS }, // Solo Secretos >= 1.5M
+        { name: 'Finder66', webhook: hookFinder66, ...PlotStream.FINDER66_PARAMS },
+        { name: 'Public', webhook: hookPublic, ...PlotStream.PUBLIC_PARAMS },
+      ]
       for (const ch of channels) {
         if (!ch.webhook) continue
         const eligible = all.filter((it) => this.meetsChannelThresholds(it, ch))
-        if (eligible.length) {
-          chosenWebhook = ch.webhook
-          chosenBadge = ch.badge
-          chosenItems = eligible
-          break
-        }
-      }
-      if (chosenWebhook && chosenItems.length) {
-        const embeds = this.buildEmbedsMarkdown(jobId, chosenItems, { scopeBadge: chosenBadge })
-        await this.postInChunks([chosenWebhook], embeds)
+        if (!eligible.length) continue
+        const embeds = this.buildEmbedsMarkdown(jobId, eligible)
+        await this.postInChunks([ch.webhook], embeds)
       }
     }
 
@@ -178,21 +243,20 @@ export class PlotStream {
 
   private buildEmbedsMarkdown(
     jobId: string,
-    itemsRaw: Array<{ name: string; p: number; plot: string; rarity?: string }>,
-    opts?: { scopeBadge?: string }
+    itemsRaw: Array<{ name: string; p: number; plot: string; rarity?: string }>
   ) {
     const items = [...itemsRaw].sort((a, b) => b.p - a.p)
     const counts = new Map<string, number>()
     for (const it of items) {
-      const bucket = it.rarity === 'Secret' ? 'Secretos' : it.rarity ?? 'Otros'
+      const bucket = it.rarity === 'Secret' ? 'Secretos' : (it.rarity ?? 'Otros')
       counts.set(bucket, (counts.get(bucket) ?? 0) + 1)
     }
     const barParts: string[] = []
     if (counts.has('Secretos')) barParts.push(`Secretos ${counts.get('Secretos')}`)
-    for (const [k2, v2] of [...counts.entries()]
-      .filter(([k3]) => k3 !== 'Secretos')
+    for (const [k, v] of [...counts.entries()]
+      .filter(([kk]) => kk !== 'Secretos')
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
-      barParts.push(`${k2} ${v2}`)
+      barParts.push(`${k} ${v}`)
     }
 
     type Row = { name: string; p: number; rarity: string }
@@ -214,13 +278,13 @@ export class PlotStream {
     })
 
     const best = items[0]
-    const TRIANGLES = '△▽△▽△▽△▽△▽△▽△▽△▽ △▽△▽△▽△▽△▽△▽△▽△▽'
     const descriptionParts = [
       '**JOB ID**',
       '```' + jobId + '```',
-      TRIANGLES,
       '',
-      best ? `**Mejor:** ${best.name} — **${this.human(best.p)}/s** — ${best.rarity ?? 'Otros'}` : null,
+      best
+        ? `**Mejor:** ${best.name} — **${this.human(best.p)}/s** — ${best.rarity ?? 'Otros'}`
+        : null,
       `**TOTAL:** ${items.length}`,
       barParts.length ? barParts.join(' | ') : null,
     ].filter(Boolean) as string[]
@@ -246,14 +310,16 @@ export class PlotStream {
         const value = `${rarityHeader(rarity)}${rows ? '\n' + rows : ''}`
         fields.push({
           name: fieldName,
-          value: value.length > PlotStream.MAX_FIELD_VALUE ? value.slice(0, PlotStream.MAX_FIELD_VALUE - 1) + '…' : value,
+          value:
+            value.length > PlotStream.MAX_FIELD_VALUE
+              ? value.slice(0, PlotStream.MAX_FIELD_VALUE - 1) + '…'
+              : value,
           inline: false,
         })
       })
     }
 
-    const title = opts?.scopeBadge ? `SauNotify • ${opts.scopeBadge}` : 'SauNotify'
-    return this.packEmbeds(title, description, fields)
+    return this.packEmbeds('SauNotify', description, fields)
   }
 
   private packEmbeds(
@@ -272,7 +338,8 @@ export class PlotStream {
         const field = { name, value: chunk, inline: false }
         const addSize = name.length + chunk.length + 10
         const wouldOverflow =
-          fieldCount >= PlotStream.MAX_FIELDS_PER_EMBED || chars + addSize > PlotStream.MAX_EMBED_CHARS
+          fieldCount >= PlotStream.MAX_FIELDS_PER_EMBED ||
+          chars + addSize > PlotStream.MAX_EMBED_CHARS
         if (wouldOverflow) {
           if (current.fields.length) embeds.push(current)
           current = this.newEmbed(title + ` (cont.)`, description)
@@ -289,16 +356,14 @@ export class PlotStream {
   }
 
   private newEmbed(title: string, description: string) {
+    const now = new Date()
+    const hora = new Intl.DateTimeFormat('es-MX', { timeStyle: 'medium' }).format(now)
     return {
       title,
       description,
       fields: [] as any[],
       footer: {
-        text: `SauNotify • ${new Intl.DateTimeFormat('es-MX', {
-          dateStyle: 'short',
-          timeStyle: 'medium',
-          timeZone: 'America/Monterrey',
-        }).format(new Date())} America/Monterrey • by qsau`,
+        text: `Hoy a las ${hora} • by qsau`,
       },
     }
   }
@@ -381,16 +446,11 @@ export class PlotStream {
           const cleaned = rawP.trim().replace(/\/s$/i, '').replace(/^\$/, '')
           p = this.parseHumanMoney(cleaned)
         }
-        items.push({
-          name,
-          p: p ?? 0,
-          plot: plot.plotSign,
-          rarity: a?.rarity,
-        })
+        items.push({ name, p: p ?? 0, plot: plot.plotSign, rarity: a?.rarity })
       }
     }
     if (!items.length) return
-    const embeds = this.buildEmbedsMarkdown(jobId, items, { scopeBadge: 'Find' })
+    const embeds = this.buildEmbedsMarkdown(jobId, items)
     await this.postInChunks([PlotStream.FIND_WEBHOOK], embeds)
   }
 }
